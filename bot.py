@@ -3,6 +3,8 @@ import asyncio
 import logging
 import sqlite3
 import json
+import requests
+from datetime import datetime
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -23,6 +25,249 @@ ADMIN_IDS = [5899591298]
 CHANNEL_ID = '@testscanset'
 SUBSCRIPTION_PRICE = 50.0
 
+# ========== СКАНЕР АРБИТРАЖА ==========
+class ArbitrageScanner:
+    def __init__(self):
+        self.exchange_urls = {
+            'Binance': 'https://api.binance.com/api/v3/ticker/price',
+            'Bybit': 'https://api.bybit.com/v5/market/tickers?category=spot',
+            'KuCoin': 'https://api.kucoin.com/api/v1/market/allTickers',
+            'OKX': 'https://www.okx.com/api/v5/market/tickers?instType=SPOT',
+            'Gate.io': 'https://api.gateio.ws/api/v4/spot/tickers',
+            'HTX': 'https://api.huobi.pro/market/tickers'
+        }
+        
+        self.coin_mapping = {
+            'BTC': 'bitcoin',
+            'ETH': 'ethereum', 
+            'BNB': 'binancecoin',
+            'SOL': 'solana',
+            'XRP': 'ripple',
+            'ADA': 'cardano',
+            'DOGE': 'dogecoin',
+            'DOT': 'polkadot',
+            'AVAX': 'avalanche-2',
+            'MATIC': 'matic-network',
+            'LINK': 'chainlink',
+            'ATOM': 'cosmos'
+        }
+        
+        self.prices_cache = {}
+        self.cache_time = {}
+        
+    async def get_prices(self, exchange):
+        """Получаем цены с биржи"""
+        try:
+            url = self.exchange_urls.get(exchange)
+            if not url:
+                return {}
+                
+            response = requests.get(url, timeout=10)
+            if response.status_code != 200:
+                return {}
+                
+            if exchange == 'Binance':
+                data = response.json()
+                prices = {}
+                for item in data:
+                    if item['symbol'].endswith('USDT'):
+                        symbol = item['symbol'].replace('USDT', '')
+                        prices[symbol] = float(item['price'])
+                return prices
+                
+            elif exchange == 'Bybit':
+                data = response.json()
+                prices = {}
+                if data['retCode'] == 0:
+                    for item in data['result']['list']:
+                        if item['symbol'].endswith('USDT'):
+                            symbol = item['symbol'].replace('USDT', '')
+                            prices[symbol] = float(item['lastPrice'])
+                return prices
+                
+            elif exchange == 'KuCoin':
+                data = response.json()
+                prices = {}
+                if data['code'] == '200000':
+                    for item in data['data']['ticker']:
+                        if item['symbol'].endswith('-USDT'):
+                            symbol = item['symbol'].replace('-USDT', '')
+                            prices[symbol] = float(item['last'])
+                return prices
+                
+            elif exchange == 'OKX':
+                data = response.json()
+                prices = {}
+                if data['code'] == '0':
+                    for item in data['data']:
+                        if item['instId'].endswith('-USDT'):
+                            symbol = item['instId'].replace('-USDT', '')
+                            prices[symbol] = float(item['last'])
+                return prices
+                
+            elif exchange == 'Gate.io':
+                data = response.json()
+                prices = {}
+                for item in data:
+                    if item['currency_pair'].endswith('_USDT'):
+                        symbol = item['currency_pair'].replace('_USDT', '')
+                        prices[symbol] = float(item['last'])
+                return prices
+                
+            elif exchange == 'HTX':
+                data = response.json()
+                prices = {}
+                if data['status'] == 'ok':
+                    for item in data['data']:
+                        if item['symbol'].endswith('usdt'):
+                            symbol = item['symbol'].replace('usdt', '').upper()
+                            prices[symbol] = float(item['close'])
+                return prices
+                
+        except Exception as e:
+            print(f"❌ Ошибка получения цен с {exchange}: {e}")
+            return {}
+            
+        return {}
+    
+    async def get_all_prices(self, brokers):
+        """Получаем цены со всех выбранных бирж"""
+        all_prices = {}
+        
+        for broker in brokers:
+            # Проверяем кэш (кешируем на 30 секунд)
+            current_time = datetime.now().timestamp()
+            if broker in self.prices_cache and broker in self.cache_time:
+                if current_time - self.cache_time[broker] < 30:
+                    all_prices[broker] = self.prices_cache[broker]
+                    continue
+            
+            prices = await self.get_prices(broker)
+            if prices:
+                self.prices_cache[broker] = prices
+                self.cache_time[broker] = current_time
+                all_prices[broker] = prices
+            await asyncio.sleep(0.5)  # Задержка между запросами
+        
+        return all_prices
+    
+    async def find_opportunities(self, brokers, min_volume, min_profit, min_profit_pct):
+        """Ищем арбитражные возможности"""
+        opportunities = []
+        
+        # Получаем цены со всех бирж
+        all_prices = await self.get_all_prices(brokers)
+        if len(all_prices) < 2:
+            return opportunities
+        
+        # Ищем общие монеты на всех биржах
+        common_coins = set()
+        for broker, prices in all_prices.items():
+            if not common_coins:
+                common_coins = set(prices.keys())
+            else:
+                common_coins = common_coins.intersection(set(prices.keys()))
+        
+        # Анализируем каждую монету
+        for coin in common_coins:
+            try:
+                # Собираем цены для этой монеты на всех биржах
+                coin_prices = {}
+                for broker, prices in all_prices.items():
+                    if coin in prices:
+                        coin_prices[broker] = prices[coin]
+                
+                if len(coin_prices) < 2:
+                    continue
+                
+                # Находим самую низкую и высокую цену
+                min_broker = min(coin_prices, key=coin_prices.get)
+                max_broker = max(coin_prices, key=coin_prices.get)
+                min_price = coin_prices[min_broker]
+                max_price = coin_prices[max_broker]
+                
+                if min_price <= 0 or max_price <= 0:
+                    continue
+                
+                # Рассчитываем профит
+                profit_pct = ((max_price - min_price) / min_price) * 100
+                
+                # Рассчитываем количество монет при заданном объеме
+                coins_amount = min_volume / min_price
+                
+                # Комиссии (примерно 0.2% на бирже и 0.1% на вывод)
+                fees = 0.003  # 0.3% суммарно
+                profit_usd = (coins_amount * max_price * (1 - fees)) - min_volume
+                
+                # Проверяем условия
+                if profit_pct >= min_profit_pct and profit_usd >= min_profit:
+                    opportunities.append({
+                        'coin': coin,
+                        'buy_exchange': min_broker,
+                        'buy_price': min_price,
+                        'sell_exchange': max_broker,
+                        'sell_price': max_price,
+                        'profit_pct': round(profit_pct, 2),
+                        'profit_usd': round(profit_usd, 2),
+                        'volume': min_volume,
+                        'coins_amount': round(coins_amount, 4)
+                    })
+                    
+            except Exception as e:
+                print(f"Ошибка анализа монеты {coin}: {e}")
+                continue
+        
+        # Сортируем по проценту профита
+        opportunities.sort(key=lambda x: x['profit_pct'], reverse=True)
+        return opportunities[:10]  # Возвращаем топ-10
+    
+    def format_signal(self, opportunity, network='BEP20'):
+        """Форматируем сигнал для отправки"""
+        coin_name = self.coin_mapping.get(opportunity['coin'], opportunity['coin'])
+        
+        message = f"🔥 <b>АРБИТРАЖНАЯ СВЯЗКА</b>\n\n"
+        message += f"💰 <b>Монета:</b> {opportunity['coin']} ({coin_name})\n"
+        message += f"📊 <b>Объем:</b> ${opportunity['volume']}\n\n"
+        
+        message += f"⬇️ <b>ПОКУПКА на {opportunity['buy_exchange']}</b>\n"
+        message += f"• Цена: ${opportunity['buy_price']:.8f}\n"
+        message += f"• Количество: {opportunity['coins_amount']} {opportunity['coin']}\n"
+        message += f"• Сумма: ${opportunity['volume']}\n\n"
+        
+        message += f"⬆️ <b>ПРОДАЖА на {opportunity['sell_exchange']}</b>\n"
+        message += f"• Цена: ${opportunity['sell_price']:.8f}\n"
+        message += f"• Выручка: ${opportunity['coins_amount'] * opportunity['sell_price']:.2f}\n\n"
+        
+        message += f"📈 <b>РЕЗУЛЬТАТ:</b>\n"
+        message += f"• Прибыль: ${opportunity['profit_usd']:.2f}\n"
+        message += f"• Доходность: {opportunity['profit_pct']:.2f}%\n\n"
+        
+        message += f"🔗 <b>Ссылки:</b>\n"
+        message += f"• Купить: {self.get_exchange_link(opportunity['buy_exchange'], opportunity['coin'])}\n"
+        message += f"• Продать: {self.get_exchange_link(opportunity['sell_exchange'], opportunity['coin'])}\n\n"
+        
+        message += f"⚠️ <b>ВАЖНО:</b>\n"
+        message += f"• Проверьте ликвидность\n"
+        message += f"• Учитывайте комиссии (0.2% на сделку + 0.1% на вывод)\n"
+        message += f"• Сеть вывода: {network}"
+        
+        return message
+    
+    def get_exchange_link(self, exchange, coin):
+        """Генерируем ссылки на биржи"""
+        links = {
+            'Binance': f'https://www.binance.com/ru/trade/{coin}_USDT',
+            'Bybit': f'https://www.bybit.com/trade/spot/{coin}/USDT',
+            'KuCoin': f'https://www.kucoin.com/trade/{coin}-USDT',
+            'OKX': f'https://www.okx.com/trade-spot/{coin}-usdt',
+            'Gate.io': f'https://www.gate.io/trade/{coin}_USDT',
+            'HTX': f'https://www.htx.com/trade/{coin.lower()}_usdt'
+        }
+        return links.get(exchange, f"{exchange}: {coin}/USDT")
+
+# Инициализируем сканер
+scanner = ArbitrageScanner()
+
 # ========== БАЗА ДАННЫХ ==========
 def init_db():
     conn = sqlite3.connect('bot.db')
@@ -34,7 +279,7 @@ def init_db():
                   min_profit REAL DEFAULT 5,
                   min_profit_pct REAL DEFAULT 3.0,
                   networks TEXT DEFAULT '["BEP20","TRC20"]',
-                  brokers TEXT DEFAULT '["KuCoin","Bybit"]',
+                  brokers TEXT DEFAULT '["Binance","Bybit"]',
                   subscription_days INTEGER DEFAULT 30,
                   total_scans INTEGER DEFAULT 0,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
@@ -207,19 +452,77 @@ async def scan_handler(callback: types.CallbackQuery):
         return
     
     increment_scans(callback.from_user.id)
-    await callback.answer("🔍 Сканирую...")
     
-    await asyncio.sleep(1)
+    # Показываем статус сканирования
+    status_msg = await callback.message.answer("🔍 <b>Начинаю сканирование...</b>", parse_mode='HTML')
     
-    signals = [
-        "👁‍🗨 KuCoin → Bybit (SOL/USDT)\n💰 Профит: 8.5 USDT\n🚩 Доход: 5.2%",
-        "👁‍🗨 Gate.io → HTX (BNB/USDT)\n💰 Профит: 12.3 USDT\n🚩 Доход: 6.8%"
-    ]
-    
-    for signal in signals[:2]:
-        await callback.message.reply(signal)
-    
-    await callback.answer(f"✅ Найдено: {len(signals)} связок")
+    try:
+        # Получаем настройки пользователя
+        brokers = user['brokers']
+        min_volume = user['min_volume']
+        min_profit = user['min_profit']
+        min_profit_pct = user['min_profit_pct']
+        
+        # Обновляем статус
+        await status_msg.edit_text("📡 <b>Получаю цены с бирж...</b>", parse_mode='HTML')
+        
+        # Ищем возможности
+        opportunities = await scanner.find_opportunities(
+            brokers, min_volume, min_profit, min_profit_pct
+        )
+        
+        if opportunities:
+            await status_msg.edit_text(f"✅ <b>Найдено {len(opportunities)} связок!</b>", parse_mode='HTML')
+            
+            # Отправляем топ-3 связки
+            for i, opp in enumerate(opportunities[:3]):
+                try:
+                    signal = scanner.format_signal(opp, user['networks'][0] if user['networks'] else 'BEP20')
+                    await callback.message.reply(signal, parse_mode='HTML')
+                    await asyncio.sleep(0.5)  # Задержка между сообщениями
+                except Exception as e:
+                    print(f"Ошибка отправки сигнала: {e}")
+                    continue
+            
+            # Предлагаем показать еще
+            if len(opportunities) > 3:
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📋 Показать все связки", callback_data=f"show_all_{len(opportunities)}")],
+                    [InlineKeyboardButton(text="🔙 Главное меню", callback_data="start")]
+                ])
+                await callback.message.answer(
+                    f"📊 Найдено {len(opportunities)} связок. Показано 3 лучших.\n"
+                    f"Нажмите 'Показать все' чтобы увидеть остальные.",
+                    reply_markup=keyboard
+                )
+            else:
+                await callback.answer(f"✅ Найдено {len(opportunities)} связок")
+        else:
+            await status_msg.edit_text("❌ <b>Подходящих связок не найдено</b>\n\n"
+                                     "Попробуйте:\n"
+                                     "• Уменьшить минимальную прибыль\n"
+                                     "• Уменьшить минимальный процент\n"
+                                     "• Добавить больше бирж", parse_mode='HTML')
+            await callback.answer("❌ Связок не найдено")
+            
+    except Exception as e:
+        await status_msg.edit_text(f"❌ <b>Ошибка сканирования:</b>\n{str(e)[:200]}", parse_mode='HTML')
+        print(f"Ошибка сканирования: {e}")
+
+@dp.callback_query(F.data.startswith("show_all_"))
+async def show_all_handler(callback: types.CallbackQuery):
+    try:
+        count = int(callback.data.split('_')[2])
+        await callback.answer(f"Показать все {count} связок")
+        
+        # Здесь можно добавить логику пагинации
+        await callback.message.answer(
+            f"📋 Всего найдено {count} связок.\n\n"
+            f"Для просмотра всех связок используйте /start и снова запустите сканирование.\n"
+            f"Или настройте фильтры для отображения лучших результатов."
+        )
+    except:
+        await callback.answer("❌ Ошибка")
 
 # ========== НАСТРОЙКА ОБЪЕМА ==========
 @dp.callback_query(F.data == "volume")
@@ -235,7 +538,7 @@ async def volume_handler(callback: types.CallbackQuery):
     ])
     
     await callback.message.edit_text(
-        "💰 <b>Выберите объем:</b>",
+        "💰 <b>Выберите объем:</b>\nМинимальная сумма для сделки",
         reply_markup=keyboard,
         parse_mode='HTML'
     )
@@ -325,22 +628,22 @@ async def network_handler(callback: types.CallbackQuery):
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text=f"BEP20 {'✅' if 'BEP20' in user['networks'] else '❌'}", 
+            text=f"BEP20 (BSC) {'✅' if 'BEP20' in user['networks'] else '❌'}", 
             callback_data="toggle_BEP20"
         )],
         [InlineKeyboardButton(
-            text=f"TRC20 {'✅' if 'TRC20' in user['networks'] else '❌'}", 
+            text=f"TRC20 (TRON) {'✅' if 'TRC20' in user['networks'] else '❌'}", 
             callback_data="toggle_TRC20"
         )],
         [InlineKeyboardButton(
-            text=f"ERC20 {'✅' if 'ERC20' in user['networks'] else '❌'}", 
+            text=f"ERC20 (Ethereum) {'✅' if 'ERC20' in user['networks'] else '❌'}", 
             callback_data="toggle_ERC20"
         )],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
     ])
     
     await callback.message.edit_text(
-        "🌐 <b>Выберите сети:</b>\n✅ - активные\n❌ - неактивные",
+        "🌐 <b>Выберите сети для вывода:</b>\n✅ - активные\n❌ - неактивные",
         reply_markup=keyboard,
         parse_mode='HTML'
     )
@@ -373,12 +676,16 @@ async def brokers_handler(callback: types.CallbackQuery):
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text=f"KuCoin {'✅' if 'KuCoin' in user['brokers'] else '❌'}", 
-            callback_data="broker_KuCoin"
+            text=f"Binance {'✅' if 'Binance' in user['brokers'] else '❌'}", 
+            callback_data="broker_Binance"
         )],
         [InlineKeyboardButton(
             text=f"Bybit {'✅' if 'Bybit' in user['brokers'] else '❌'}", 
             callback_data="broker_Bybit"
+        )],
+        [InlineKeyboardButton(
+            text=f"KuCoin {'✅' if 'KuCoin' in user['brokers'] else '❌'}", 
+            callback_data="broker_KuCoin"
         )],
         [InlineKeyboardButton(
             text=f"OKX {'✅' if 'OKX' in user['brokers'] else '❌'}", 
@@ -396,7 +703,8 @@ async def brokers_handler(callback: types.CallbackQuery):
     ])
     
     await callback.message.edit_text(
-        "🏦 <b>Выберите биржи:</b>\n✅ - активные\n❌ - неактивные",
+        "🏦 <b>Выберите биржи для сканирования:</b>\n✅ - активные\n❌ - неактивные\n\n"
+        "Для арбитража нужно минимум 2 биржи",
         reply_markup=keyboard,
         parse_mode='HTML'
     )
@@ -434,7 +742,11 @@ async def payment_handler(callback: types.CallbackQuery):
         "• 30 дней - $50\n"
         "• 60 дней - $90 (экономия $10)\n"
         "• 90 дней - $120 (экономия $30)\n\n"
-        "После оплаты подписка активируется автоматически.",
+        "✅ <b>Включает:</b>\n"
+        "• Неограниченное сканирование\n"
+        "• Доступ ко всем биржам\n"
+        "• Техническую поддержку\n"
+        "• Обновления бота",
         reply_markup=keyboard,
         parse_mode='HTML'
     )
@@ -471,288 +783,12 @@ async def process_payment_handler(callback: types.CallbackQuery):
 async def help_handler(callback: types.CallbackQuery):
     help_text = """🆘 <b>Помощь по боту</b>
 
-<b>Основные функции:</b>
-• 🔥 <b>Сканировать</b> - поиск арбитражных возможностей
-• ⚙️ <b>Объем</b> - минимальная сумма сделки
-• 💵 <b>Профит</b> - минимальная прибыль в USDT
-• 📈 <b>Доход %</b> - минимальный процент прибыли
-• 🌐 <b>Сеть</b> - выбор блокчейн-сетей
-• 🏦 <b>Брокеры</b> - выбор бирж для сканирования
-• 💳 <b>Оплатить</b> - покупка подписки
+<b>Как работает арбитраж:</b>
+1. Бот сканирует цены на разных биржах
+2. Находит разницу в ценах одной монеты
+3. Рассчитывает прибыль с учетом комиссий
+4. Показывает где купить дешевле и продать дороже
 
-<b>Как работает:</b>
-1. Настройте параметры
-2. Купите подписку
-3. Нажимайте "Сканировать"
-4. Получайте сигналы
-
-<b>Поддержка:</b>
-Для связи: @support"""
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
-    ])
-    
-    await callback.message.edit_text(help_text, reply_markup=keyboard, parse_mode='HTML')
-    await callback.answer()
-
-# ========== АДМИН ПАНЕЛЬ ==========
-@dp.callback_query(F.data == "admin")
-async def admin_panel_handler(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("🚫 Доступ запрещен", show_alert=True)
-        return
-    
-    users = get_all_users()
-    active_users = sum(1 for u in users if u[2] > 0)
-    total_scans = sum(u[3] for u in users)
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin_users")],
-        [InlineKeyboardButton(text="💰 Выдать подписку", callback_data="admin_give_sub")],
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
-        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="start")]
-    ])
-    
-    await callback.message.edit_text(
-        f"👑 <b>Админ панель</b>\n\n"
-        f"👥 Пользователей: {len(users)}\n"
-        f"✅ Активных: {active_users}\n"
-        f"📊 Сканирований: {total_scans}",
-        reply_markup=keyboard,
-        parse_mode='HTML'
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_stats")
-async def admin_stats_handler(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        return
-    
-    users = get_all_users()
-    active_users = sum(1 for u in users if u[2] > 0)
-    total_scans = sum(u[3] for u in users)
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin")]
-    ])
-    
-    text = f"📊 <b>Статистика бота</b>\n\n"
-    text += f"👥 Всего пользователей: {len(users)}\n"
-    text += f"✅ Активных подписок: {active_users}\n"
-    text += f"📈 Сканирований всего: {total_scans}\n\n"
-    text += f"<b>Топ пользователей:</b>\n"
-    
-    top_users = sorted(users, key=lambda x: x[3], reverse=True)[:5]
-    for i, (user_id, username, days, scans) in enumerate(top_users, 1):
-        text += f"{i}. @{username or 'Без имени'}: {scans} сканирований, {days} дней подписки\n"
-    
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_users")
-async def admin_users_handler(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        return
-    
-    users = get_all_users()
-    
-    buttons = []
-    for user_id, username, days, scans in users[:10]:
-        status = "✅" if days > 0 else "❌"
-        btn_text = f"{status} @{username or 'Без имени'} ({scans})"
-        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"user_{user_id}")])
-    
-    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin")])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    
-    await callback.message.edit_text(
-        "👥 <b>Список пользователей</b>\n✅ - активная подписка\n❌ - нет подписки\n(число) - сканирований",
-        reply_markup=keyboard,
-        parse_mode='HTML'
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("user_"))
-async def admin_user_detail_handler(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        return
-    
-    try:
-        user_id = int(callback.data.split('_')[1])
-        user = get_user(user_id)
-        
-        if not user:
-            await callback.answer("Пользователь не найден")
-            return
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ 7 дней", callback_data=f"addsub_{user_id}_7"),
-             InlineKeyboardButton(text="➕ 30 дней", callback_data=f"addsub_{user_id}_30")],
-            [InlineKeyboardButton(text="➕ 90 дней", callback_data=f"addsub_{user_id}_90")],
-            [InlineKeyboardButton(text="🔙 К списку", callback_data="admin_users")]
-        ])
-        
-        await callback.message.edit_text(
-            f"👤 <b>Пользователь:</b> @{user['username']}\n"
-            f"🆔 ID: {user_id}\n"
-            f"📅 Подписка: {user['subscription_days']} дней\n"
-            f"📊 Сканирований: {user['total_scans']}\n"
-            f"💰 Объем: ${user['min_volume']}\n"
-            f"💵 Профит: ${user['min_profit']}\n"
-            f"📈 Доход: {user['min_profit_pct']}%",
-            reply_markup=keyboard,
-            parse_mode='HTML'
-        )
-        await callback.answer()
-    except Exception as e:
-        await callback.answer(f"❌ Ошибка: {e}")
-
-@dp.callback_query(F.data.startswith("addsub_"))
-async def admin_add_subscription_handler(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        return
-    
-    try:
-        _, user_id, days = callback.data.split('_')
-        user_id = int(user_id)
-        days = int(days)
-        
-        add_subscription(user_id, days)
-        
-        await callback.answer(f"✅ Добавлено {days} дней пользователю", show_alert=True)
-        await admin_user_detail_handler(callback)
-    except Exception as e:
-        await callback.answer(f"❌ Ошибка: {e}")
-
-@dp.callback_query(F.data == "admin_give_sub")
-async def admin_give_sub_handler(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in ADMIN_IDS:
-        return
-    
-    await callback.message.edit_text(
-        "💰 <b>Выдача подписки</b>\n\n"
-        "Введите ID пользователя и количество дней через пробел:\n"
-        "Пример: <code>123456789 30</code>",
-        parse_mode='HTML'
-    )
-    await state.set_state(Form.adding_subscription)
-    await callback.answer()
-
-@dp.message(Form.adding_subscription)
-async def process_add_subscription(message: types.Message, state: FSMContext):
-    try:
-        parts = message.text.split()
-        if len(parts) != 2:
-            raise ValueError("Неверный формат")
-        
-        user_id = int(parts[0])
-        days = int(parts[1])
-        
-        if days <= 0:
-            await message.answer("❌ Количество дней должно быть больше 0")
-            return
-        
-        add_subscription(user_id, days)
-        
-        user = get_user(user_id)
-        username = user['username'] if user else "Неизвестный"
-        
-        await message.answer(f"✅ Пользователю @{username} добавлено {days} дней подписки")
-        
-        try:
-            await bot.send_message(
-                user_id,
-                f"🎉 Вам выдана подписка на {days} дней!\n"
-                f"Теперь у вас активная подписка."
-            )
-        except:
-            pass
-            
-    except ValueError as e:
-        await message.answer(f"❌ Неверный формат. Пример: 123456789 30")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
-    
-    await state.clear()
-
-@dp.callback_query(F.data == "admin_broadcast")
-async def admin_broadcast_handler(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in ADMIN_IDS:
-        return
-    
-    await callback.message.edit_text(
-        "📢 <b>Рассылка сообщений</b>\n\n"
-        "Введите сообщение для рассылки всем пользователям:",
-        parse_mode='HTML'
-    )
-    await state.set_state(Form.broadcast_message)
-    await callback.answer()
-
-@dp.message(Form.broadcast_message)
-async def process_broadcast(message: types.Message, state: FSMContext):
-    users = get_all_users()
-    sent = 0
-    failed = 0
-    
-    progress_msg = await message.answer(f"📤 Начинаю рассылку для {len(users)} пользователей...")
-    
-    for user_id, username, _, _ in users:
-        try:
-            await bot.send_message(user_id, message.text)
-            sent += 1
-            if sent % 10 == 0:
-                await progress_msg.edit_text(f"📤 Отправлено: {sent}/{len(users)}...")
-        except:
-            failed += 1
-        await asyncio.sleep(0.1)
-    
-    await progress_msg.edit_text(
-        f"✅ Рассылка завершена:\n"
-        f"📤 Отправлено: {sent}\n"
-        f"❌ Не отправлено: {failed}"
-    )
-    
-    await state.clear()
-
-# ========== ОБРАБОТКА ПЕРЕВОДОВ ==========
-@dp.message(F.text)
-async def handle_transaction_hash(message: types.Message):
-    # Простая проверка на хеш транзакции
-    if len(message.text) > 50 and any(c in message.text for c in 'abcdef0123456789'):
-        user_id = message.from_user.id
-        add_subscription(user_id, 30)  # 30 дней за оплату
-        
-        await message.answer(
-            f"✅ Спасибо за оплату!\n"
-            f"Ваша подписка активирована на 30 дней.\n"
-            f"Теперь вы можете использовать функцию сканирования!"
-        )
-
-# ========== ЗАПУСК БОТА ==========
-async def main():
-    print("🚀 Запуск бота...")
-    print(f"📢 Канал: {CHANNEL_ID}")
-    print(f"👑 Админы: {ADMIN_IDS}")
-    
-    # Запускаем авто-сканер (упрощенный)
-    asyncio.create_task(auto_scanner())
-    
-    await dp.start_polling(bot)
-
-async def auto_scanner():
-    """Автоматическое сканирование каждые 5 минут"""
-    while True:
-        try:
-            await asyncio.sleep(300)  # 5 минут
-            
-            # Здесь может быть логика сканирования
-            print("🔄 Авто-сканер работает...")
-            
-        except Exception as e:
-            print(f"❌ Ошибка авто-сканера: {e}")
-            await asyncio.sleep(60)
-
-if __name__ == '__main__':
-    asyncio.run(main())
+<b>Рекомендуемые настройки:</b>
+• Объем: $100-1000
+•
