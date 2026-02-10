@@ -131,6 +131,7 @@ class Form(StatesGroup):
     waiting_profit_pct = State()
     waiting_volume_custom = State()
     adding_subscription = State()
+    broadcast_message = State()
 
 # ========== ГЛАВНОЕ МЕНЮ ==========
 @dp.message(Command("start"))
@@ -171,6 +172,11 @@ async def cmd_start(message: types.Message):
         parse_mode='HTML'
     )
 
+@dp.callback_query(F.data == "start")
+async def start_callback(callback: types.CallbackQuery):
+    await cmd_start(callback.message)
+    await callback.answer()
+
 # ========== ПРОФИЛЬ ==========
 @dp.callback_query(F.data == "profile")
 async def profile_handler(callback: types.CallbackQuery):
@@ -187,9 +193,9 @@ async def profile_handler(callback: types.CallbackQuery):
         f"💵 <b>Мин. профит:</b> ${user['min_profit']}\n"
         f"📈 <b>Мин. доход:</b> {user['min_profit_pct']}%\n"
         f"🌐 <b>Сети:</b> {', '.join(user['networks'])}\n"
-        f"🏦 <b>Брокеры:</b> {', '.join(user['brokers'])}\n\n"
-        f"🔐 <b>Подписка:</b> {user['subscription_days']} дней\n"
-        f"📊 <b>Сканирований:</b> {user['total_scans']}",
+        f"🏦 <b>Брокеры:</б> {', '.join(user['brokers'])}\n\n"
+        f"🔐 <b>Подписка:</б> {user['subscription_days']} дней\n"
+        f"📊 <b>Сканирований:</б> {user['total_scans']}",
         reply_markup=reply_markup,
         parse_mode='HTML'
     )
@@ -304,16 +310,33 @@ async def process_profit_pct(message: types.Message, state: FSMContext):
 # ========== ВЫБОР СЕТИ ==========
 @dp.callback_query(F.data == "network")
 async def network_handler(callback: types.CallbackQuery):
+    user = get_user(callback.from_user.id)
+    
     keyboard = [
-        [InlineKeyboardButton(text="BEP20 ✅", callback_data="toggle_BEP20")],
-        [InlineKeyboardButton(text="TRC20 ✅", callback_data="toggle_TRC20")],
-        [InlineKeyboardButton(text="ERC20", callback_data="toggle_ERC20")],
+        [
+            InlineKeyboardButton(
+                text=f"BEP20 {'✅' if 'BEP20' in user['networks'] else '❌'}", 
+                callback_data="toggle_BEP20"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"TRC20 {'✅' if 'TRC20' in user['networks'] else '❌'}", 
+                callback_data="toggle_TRC20"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"ERC20 {'✅' if 'ERC20' in user['networks'] else '❌'}", 
+                callback_data="toggle_ERC20"
+            )
+        ],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
     ]
     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     
     await callback.message.edit_text(
-        "🌐 <b>Выберите сети:</b>\n✅ - активные",
+        "🌐 <b>Выберите сети:</b>\n✅ - активные\n❌ - неактивные",
         reply_markup=reply_markup,
         parse_mode='HTML'
     )
@@ -334,18 +357,45 @@ async def toggle_network_handler(callback: types.CallbackQuery):
 # ========== ВЫБОР БРОКЕРОВ ==========
 @dp.callback_query(F.data == "brokers")
 async def brokers_handler(callback: types.CallbackQuery):
+    user = get_user(callback.from_user.id)
+    
     keyboard = [
-        [InlineKeyboardButton(text="KuCoin ✅", callback_data="broker_KuCoin")],
-        [InlineKeyboardButton(text="Bybit ✅", callback_data="broker_Bybit")],
-        [InlineKeyboardButton(text="OKX", callback_data="broker_OKX")],
-        [InlineKeyboardButton(text="Gate.io", callback_data="broker_Gate.io")],
-        [InlineKeyboardButton(text="HTX", callback_data="broker_HTX")],
+        [
+            InlineKeyboardButton(
+                text=f"KuCoin {'✅' if 'KuCoin' in user['brokers'] else '❌'}", 
+                callback_data="broker_KuCoin"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"Bybit {'✅' if 'Bybit' in user['brokers'] else '❌'}", 
+                callback_data="broker_Bybit"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"OKX {'✅' if 'OKX' in user['brokers'] else '❌'}", 
+                callback_data="broker_OKX"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"Gate.io {'✅' if 'Gate.io' in user['brokers'] else '❌'}", 
+                callback_data="broker_Gate.io"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"HTX {'✅' if 'HTX' in user['brokers'] else '❌'}", 
+                callback_data="broker_HTX"
+            )
+        ],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
     ]
     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     
     await callback.message.edit_text(
-        "🏦 <b>Выберите биржи:</b>\n✅ - активные",
+        "🏦 <b>Выберите биржи:</b>\n✅ - активные\n❌ - неактивные",
         reply_markup=reply_markup,
         parse_mode='HTML'
     )
@@ -366,12 +416,13 @@ async def toggle_broker_handler(callback: types.CallbackQuery):
 # ========== ОПЛАТА ==========
 @dp.callback_query(F.data == "pay")
 async def payment_handler(callback: types.CallbackQuery):
-    payment_url = "https://nowpayments.io/payment"  # Замените на реальную ссылку
+    # В реальном проекте здесь будут реальные ссылки на оплату
+    payment_url = "https://example.com/payment"
     
     keyboard = [
-        [InlineKeyboardButton(text="💳 Оплатить $50 (30 дней)", url=payment_url)],
-        [InlineKeyboardButton(text="💳 Оплатить $90 (60 дней)", url=f"{payment_url}?amount=90")],
-        [InlineKeyboardButton(text="💳 Оплатить $120 (90 дней)", url=f"{payment_url}?amount=120")],
+        [InlineKeyboardButton(text="💳 30 дней - $50", callback_data="pay_30")],
+        [InlineKeyboardButton(text="💳 60 дней - $90", callback_data="pay_60")],
+        [InlineKeyboardButton(text="💳 90 дней - $120", callback_data="pay_90")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
     ]
     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -381,8 +432,25 @@ async def payment_handler(callback: types.CallbackQuery):
         "• 30 дней - $50\n"
         "• 60 дней - $90 (экономия $10)\n"
         "• 90 дней - $120 (экономия $30)\n\n"
-        "После оплаты подписка активируется автоматически в течение 5 минут.",
+        "После оплаты подписка активируется автоматически.",
         reply_markup=reply_markup,
+        parse_mode='HTML'
+    )
+
+@dp.callback_query(F.data.startswith("pay_"))
+async def process_payment_handler(callback: types.CallbackQuery):
+    days = int(callback.data.split('_')[1])
+    prices = {30: 50, 60: 90, 90: 120}
+    
+    await callback.answer(f"✅ Тариф на {days} дней выбран. Цена: ${prices[days]}")
+    await callback.message.edit_text(
+        f"💳 <b>Оплата тарифа на {days} дней</b>\n\n"
+        f"Цена: ${prices[days]}\n\n"
+        f"Для оплаты:\n"
+        f"1. Переведите ${prices[days]} USDT на адрес:\n"
+        f"<code>0x1234567890abcdef1234567890abcdef12345678</code>\n\n"
+        f"2. Отправьте хеш транзакции в ответ на это сообщение\n\n"
+        f"После подтверждения транзакции подписка будет активирована.",
         parse_mode='HTML'
     )
 
@@ -394,11 +462,11 @@ async def help_handler(callback: types.CallbackQuery):
 <b>Основные функции:</b>
 • 🔥 <b>Сканировать</b> - поиск арбитражных возможностей
 • ⚙️ <b>Объем</b> - минимальная сумма сделки
-• 💵 <b>Профит</b> - минимальная прибыль в USDT
-• 📈 <b>Доход %</b> - минимальный процент прибыли
-• 🌐 <b>Сеть</b> - выбор блокчейн-сетей
-• 🏦 <b>Брокеры</b> - выбор бирж для сканирования
-• 💳 <b>Оплатить</b> - покупка подписки
+• 💵 <b>Профит</б> - минимальная прибыль в USDT
+• 📈 <b>Доход %</б> - минимальный процент прибыли
+• 🌐 <b>Сеть</б> - выбор блокчейн-сетей
+• 🏦 <b>Брокеры</б> - выбор бирж для сканирования
+• 💳 <b>Оплатить</б> - покупка подписки
 
 <b>Как работает:</b>
 1. Настройте параметры
@@ -459,21 +527,16 @@ async def admin_stats_handler(callback: types.CallbackQuery):
     ]
     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     
-    await callback.message.edit_text(
-        f"📊 <b>Статистика бота</b>\n\n"
-        f"👥 Всего пользователей: {len(users)}\n"
-        f"✅ Активных подписок: {active_users}\n"
-        f"📈 Сканирований всего: {total_scans}\n\n"
-        f"<b>Топ пользователей:</b>\n",
-        reply_markup=reply_markup,
-        parse_mode='HTML'
-    )
+    text = f"📊 <b>Статистика бота</b>\n\n"
+    text += f"👥 Всего пользователей: {len(users)}\n"
+    text += f"✅ Активных подписок: {active_users}\n"
+    text += f"📈 Сканирований всего: {total_scans}\n\n"
+    text += f"<b>Топ пользователей:</b>\n"
     
     # Добавляем топ-5 пользователей
     top_users = sorted(users, key=lambda x: x[3], reverse=True)[:5]
-    text = callback.message.text + "\n"
     for i, (user_id, username, days, scans) in enumerate(top_users, 1):
-        text += f"{i}. @{username}: {scans} сканирований, {days} дней подписки\n"
+        text += f"{i}. @{username or 'Без имени'}: {scans} сканирований, {days} дней подписки\n"
     
     await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode='HTML')
 
@@ -487,7 +550,7 @@ async def admin_users_handler(callback: types.CallbackQuery):
     keyboard = []
     for user_id, username, days, scans in users[:10]:  # Показываем первые 10
         status = "✅" if days > 0 else "❌"
-        btn_text = f"{status} @{username} ({scans})"
+        btn_text = f"{status} @{username or 'Без имени'} ({scans})"
         keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"user_{user_id}")])
     
     keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin")])
@@ -561,7 +624,13 @@ async def admin_give_sub_handler(callback: types.CallbackQuery, state: FSMContex
 @dp.message(Form.adding_subscription)
 async def process_add_subscription(message: types.Message, state: FSMContext):
     try:
-        user_id, days = map(int, message.text.split())
+        parts = message.text.split()
+        if len(parts) != 2:
+            raise ValueError
+        
+        user_id = int(parts[0])
+        days = int(parts[1])
+        
         add_subscription(user_id, days)
         
         # Получаем информацию о пользователе
@@ -583,7 +652,7 @@ async def process_add_subscription(message: types.Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Неверный формат. Пример: 123456789 30")
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
     
     await state.clear()
 
@@ -597,32 +666,32 @@ async def admin_broadcast_handler(callback: types.CallbackQuery, state: FSMConte
         "Введите сообщение для рассылки всем пользователям:",
         parse_mode='HTML'
     )
-    await state.set_state("broadcast_message")
+    await state.set_state(Form.broadcast_message)
 
-@dp.message(F.text, lambda m: m.from_user.id in ADMIN_IDS)
+@dp.message(Form.broadcast_message)
 async def process_broadcast(message: types.Message, state: FSMContext):
-    if await state.get_state() == "broadcast_message":
-        users = get_all_users()
-        sent = 0
-        failed = 0
-        
-        await message.answer(f"📤 Начинаю рассылку для {len(users)} пользователей...")
-        
-        for user_id, username, _, _ in users:
-            try:
-                await bot.send_message(user_id, message.text)
-                sent += 1
-            except:
-                failed += 1
-            await asyncio.sleep(0.05)  # Задержка чтобы не спамить
-        
-        await message.answer(
-            f"✅ Рассылка завершена:\n"
-            f"📤 Отправлено: {sent}\n"
-            f"❌ Не отправлено: {failed}"
-        )
-        
-        await state.clear()
+    users = get_all_users()
+    sent = 0
+    failed = 0
+    
+    await message.answer(f"📤 Начинаю рассылку для {len(users)} пользователей...")
+    
+    for user_id, username, _, _ in users:
+        try:
+            await bot.send_message(user_id, message.text)
+            sent += 1
+        except Exception as e:
+            print(f"Ошибка отправки пользователю {user_id}: {e}")
+            failed += 1
+        await asyncio.sleep(0.05)  # Задержка чтобы не спамить
+    
+    await message.answer(
+        f"✅ Рассылка завершена:\n"
+        f"📤 Отправлено: {sent}\n"
+        f"❌ Не отправлено: {failed}"
+    )
+    
+    await state.clear()
 
 # ========== ЗАПУСК БОТА ==========
 async def main():
