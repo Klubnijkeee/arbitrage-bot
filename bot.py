@@ -9,6 +9,9 @@ import requests
 from database import get_user_settings, save_user_settings
 from config import ADMIN_ID, DEFAULT_SETTINGS
 from scanner import ArbitrageScanner
+from config import BOT_TOKEN, ADMIN_ID, DEFAULT_SETTINGS, CHANNEL_ID
+from database import get_user_settings, save_user_settings
+from scanner import ArbitrageScanner
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -144,3 +147,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
