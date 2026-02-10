@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: arbitrage-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        value: "5899591298"
+      - key: CHANNEL_ID
+        value: "@testscanset"
+    healthCheckPath: /
+    autoDeploy: true
