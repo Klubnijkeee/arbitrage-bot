@@ -1,6 +1,4 @@
-aiogram
-ccxt==4.0.105
+aiogram==2.25.1
+ccxt==3.1.50
 aioschedule==0.5.2
-
 python-dotenv==1.0.0
-
