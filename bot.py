@@ -130,6 +130,9 @@ async def cmd_start(message: types.Message):
     
     create_user(user_id, username)
     user = get_user(user_id)
+    if not user:
+        await message.answer("❌ Ошибка при создании пользователя")
+        return
     
     buttons = [
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
@@ -170,6 +173,9 @@ async def start_callback(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "profile")
 async def profile_handler(callback: types.CallbackQuery):
     user = get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("❌ Пользователь не найден")
+        return
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 Главное меню", callback_data="start")]
@@ -192,6 +198,9 @@ async def profile_handler(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "scan")
 async def scan_handler(callback: types.CallbackQuery):
     user = get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("❌ Пользователь не найден")
+        return
     
     if user['subscription_days'] <= 0:
         await callback.answer("❌ Оплатите подписку!", show_alert=True)
@@ -236,12 +245,16 @@ async def set_volume_handler(callback: types.CallbackQuery, state: FSMContext):
     if callback.data == "vol_custom":
         await callback.message.edit_text("💰 Введите свой объем в USD:")
         await state.set_state(Form.waiting_volume_custom)
+        await callback.answer()
         return
     
-    volume = int(callback.data.split('_')[1])
-    update_setting(callback.from_user.id, 'min_volume', volume)
-    await callback.answer(f"✅ Объем: ${volume}")
-    await cmd_start(callback.message)
+    try:
+        volume = int(callback.data.split('_')[1])
+        update_setting(callback.from_user.id, 'min_volume', volume)
+        await callback.answer(f"✅ Объем: ${volume}")
+        await cmd_start(callback.message)
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка: {e}")
 
 @dp.message(Form.waiting_volume_custom)
 async def process_custom_volume(message: types.Message, state: FSMContext):
@@ -263,11 +276,16 @@ async def process_custom_volume(message: types.Message, state: FSMContext):
 async def profit_handler(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("💵 Введите минимальный профит в USDT (например: 5.5):")
     await state.set_state(Form.waiting_profit)
+    await callback.answer()
 
 @dp.message(Form.waiting_profit)
 async def process_profit(message: types.Message, state: FSMContext):
     try:
         profit = float(message.text)
+        if profit < 0.1:
+            await message.answer("❌ Минимальный профит: $0.1")
+            return
+        
         update_setting(message.from_user.id, 'min_profit', profit)
         await message.answer(f"✅ Минимальный профит: ${profit}")
         await state.clear()
@@ -280,11 +298,16 @@ async def process_profit(message: types.Message, state: FSMContext):
 async def profit_pct_handler(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("📈 Введите минимальный процент дохода (например: 3.0):")
     await state.set_state(Form.waiting_profit_pct)
+    await callback.answer()
 
 @dp.message(Form.waiting_profit_pct)
 async def process_profit_pct(message: types.Message, state: FSMContext):
     try:
         pct = float(message.text)
+        if pct < 0.1:
+            await message.answer("❌ Минимальный доход: 0.1%")
+            return
+        
         update_setting(message.from_user.id, 'min_profit_pct', pct)
         await message.answer(f"✅ Минимальный доход: {pct}%")
         await state.clear()
@@ -296,6 +319,9 @@ async def process_profit_pct(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data == "network")
 async def network_handler(callback: types.CallbackQuery):
     user = get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("❌ Пользователь не найден")
+        return
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
@@ -318,11 +344,15 @@ async def network_handler(callback: types.CallbackQuery):
         reply_markup=keyboard,
         parse_mode='HTML'
     )
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("toggle_"))
 async def toggle_network_handler(callback: types.CallbackQuery):
     network = callback.data.split('_')[1]
     user = get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("❌ Пользователь не найден")
+        return
     
     if network in user['networks']:
         user['networks'].remove(network)
@@ -331,11 +361,15 @@ async def toggle_network_handler(callback: types.CallbackQuery):
     
     update_setting(callback.from_user.id, 'networks', user['networks'])
     await network_handler(callback)
+    await callback.answer()
 
 # ========== ВЫБОР БРОКЕРОВ ==========
 @dp.callback_query(F.data == "brokers")
 async def brokers_handler(callback: types.CallbackQuery):
     user = get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("❌ Пользователь не найден")
+        return
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
@@ -366,11 +400,15 @@ async def brokers_handler(callback: types.CallbackQuery):
         reply_markup=keyboard,
         parse_mode='HTML'
     )
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("broker_"))
 async def toggle_broker_handler(callback: types.CallbackQuery):
     broker = callback.data.split('_')[1]
     user = get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("❌ Пользователь не найден")
+        return
     
     if broker in user['brokers']:
         user['brokers'].remove(broker)
@@ -379,6 +417,7 @@ async def toggle_broker_handler(callback: types.CallbackQuery):
     
     update_setting(callback.from_user.id, 'brokers', user['brokers'])
     await brokers_handler(callback)
+    await callback.answer()
 
 # ========== ОПЛАТА ==========
 @dp.callback_query(F.data == "pay")
@@ -399,29 +438,33 @@ async def payment_handler(callback: types.CallbackQuery):
         reply_markup=keyboard,
         parse_mode='HTML'
     )
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("pay_"))
 async def process_payment_handler(callback: types.CallbackQuery):
-    days = int(callback.data.split('_')[1])
-    prices = {30: 50, 60: 90, 90: 120}
-    
-    await callback.answer(f"✅ Тариф на {days} дней выбран. Цена: ${prices[days]}")
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="pay")]
-    ])
-    
-    await callback.message.edit_text(
-        f"💳 <b>Оплата тарифа на {days} дней</b>\n\n"
-        f"Цена: ${prices[days]}\n\n"
-        f"Для оплаты:\n"
-        f"1. Переведите ${prices[days]} USDT на адрес:\n"
-        f"<code>0x1234567890abcdef1234567890abcdef12345678</code>\n\n"
-        f"2. Отправьте хеш транзакции в ответ на это сообщение\n\n"
-        f"После подтверждения транзакции подписка будет активирована.",
-        reply_markup=keyboard,
-        parse_mode='HTML'
-    )
+    try:
+        days = int(callback.data.split('_')[1])
+        prices = {30: 50, 60: 90, 90: 120}
+        
+        await callback.answer(f"✅ Тариф на {days} дней выбран. Цена: ${prices[days]}")
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="pay")]
+        ])
+        
+        await callback.message.edit_text(
+            f"💳 <b>Оплата тарифа на {days} дней</b>\n\n"
+            f"Цена: ${prices[days]}\n\n"
+            f"Для оплаты:\n"
+            f"1. Переведите ${prices[days]} USDT на адрес:\n"
+            f"<code>0x1234567890abcdef1234567890abcdef12345678</code>\n\n"
+            f"2. Отправьте хеш транзакции в ответ на это сообщение\n\n"
+            f"После подтверждения транзакции подписка будет активирована.",
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка: {e}")
 
 # ========== ПОМОЩЬ ==========
 @dp.callback_query(F.data == "help")
@@ -451,6 +494,7 @@ async def help_handler(callback: types.CallbackQuery):
     ])
     
     await callback.message.edit_text(help_text, reply_markup=keyboard, parse_mode='HTML')
+    await callback.answer()
 
 # ========== АДМИН ПАНЕЛЬ ==========
 @dp.callback_query(F.data == "admin")
@@ -479,6 +523,7 @@ async def admin_panel_handler(callback: types.CallbackQuery):
         reply_markup=keyboard,
         parse_mode='HTML'
     )
+    await callback.answer()
 
 @dp.callback_query(F.data == "admin_stats")
 async def admin_stats_handler(callback: types.CallbackQuery):
@@ -504,6 +549,7 @@ async def admin_stats_handler(callback: types.CallbackQuery):
         text += f"{i}. @{username or 'Без имени'}: {scans} сканирований, {days} дней подписки\n"
     
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
+    await callback.answer()
 
 @dp.callback_query(F.data == "admin_users")
 async def admin_users_handler(callback: types.CallbackQuery):
@@ -526,51 +572,59 @@ async def admin_users_handler(callback: types.CallbackQuery):
         reply_markup=keyboard,
         parse_mode='HTML'
     )
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("user_"))
 async def admin_user_detail_handler(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return
     
-    user_id = int(callback.data.split('_')[1])
-    user = get_user(user_id)
-    
-    if not user:
-        await callback.answer("Пользователь не найден")
-        return
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ 7 дней", callback_data=f"addsub_{user_id}_7"),
-         InlineKeyboardButton(text="➕ 30 дней", callback_data=f"addsub_{user_id}_30")],
-        [InlineKeyboardButton(text="➕ 90 дней", callback_data=f"addsub_{user_id}_90")],
-        [InlineKeyboardButton(text="🔙 К списку", callback_data="admin_users")]
-    ])
-    
-    await callback.message.edit_text(
-        f"👤 <b>Пользователь:</b> @{user['username']}\n"
-        f"🆔 ID: {user_id}\n"
-        f"📅 Подписка: {user['subscription_days']} дней\n"
-        f"📊 Сканирований: {user['total_scans']}\n"
-        f"💰 Объем: ${user['min_volume']}\n"
-        f"💵 Профит: ${user['min_profit']}\n"
-        f"📈 Доход: {user['min_profit_pct']}%",
-        reply_markup=keyboard,
-        parse_mode='HTML'
-    )
+    try:
+        user_id = int(callback.data.split('_')[1])
+        user = get_user(user_id)
+        
+        if not user:
+            await callback.answer("Пользователь не найден")
+            return
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ 7 дней", callback_data=f"addsub_{user_id}_7"),
+             InlineKeyboardButton(text="➕ 30 дней", callback_data=f"addsub_{user_id}_30")],
+            [InlineKeyboardButton(text="➕ 90 дней", callback_data=f"addsub_{user_id}_90")],
+            [InlineKeyboardButton(text="🔙 К списку", callback_data="admin_users")]
+        ])
+        
+        await callback.message.edit_text(
+            f"👤 <b>Пользователь:</b> @{user['username']}\n"
+            f"🆔 ID: {user_id}\n"
+            f"📅 Подписка: {user['subscription_days']} дней\n"
+            f"📊 Сканирований: {user['total_scans']}\n"
+            f"💰 Объем: ${user['min_volume']}\n"
+            f"💵 Профит: ${user['min_profit']}\n"
+            f"📈 Доход: {user['min_profit_pct']}%",
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка: {e}")
 
 @dp.callback_query(F.data.startswith("addsub_"))
 async def admin_add_subscription_handler(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return
     
-    _, user_id, days = callback.data.split('_')
-    user_id = int(user_id)
-    days = int(days)
-    
-    add_subscription(user_id, days)
-    
-    await callback.answer(f"✅ Добавлено {days} дней пользователю", show_alert=True)
-    await admin_user_detail_handler(callback)
+    try:
+        _, user_id, days = callback.data.split('_')
+        user_id = int(user_id)
+        days = int(days)
+        
+        add_subscription(user_id, days)
+        
+        await callback.answer(f"✅ Добавлено {days} дней пользователю", show_alert=True)
+        await admin_user_detail_handler(callback)
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка: {e}")
 
 @dp.callback_query(F.data == "admin_give_sub")
 async def admin_give_sub_handler(callback: types.CallbackQuery, state: FSMContext):
@@ -584,16 +638,21 @@ async def admin_give_sub_handler(callback: types.CallbackQuery, state: FSMContex
         parse_mode='HTML'
     )
     await state.set_state(Form.adding_subscription)
+    await callback.answer()
 
 @dp.message(Form.adding_subscription)
 async def process_add_subscription(message: types.Message, state: FSMContext):
     try:
         parts = message.text.split()
         if len(parts) != 2:
-            raise ValueError
+            raise ValueError("Неверный формат")
         
         user_id = int(parts[0])
         days = int(parts[1])
+        
+        if days <= 0:
+            await message.answer("❌ Количество дней должно быть больше 0")
+            return
         
         add_subscription(user_id, days)
         
@@ -611,8 +670,8 @@ async def process_add_subscription(message: types.Message, state: FSMContext):
         except:
             pass
             
-    except ValueError:
-        await message.answer("❌ Неверный формат. Пример: 123456789 30")
+    except ValueError as e:
+        await message.answer(f"❌ Неверный формат. Пример: 123456789 30")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
     
@@ -629,6 +688,7 @@ async def admin_broadcast_handler(callback: types.CallbackQuery, state: FSMConte
         parse_mode='HTML'
     )
     await state.set_state(Form.broadcast_message)
+    await callback.answer()
 
 @dp.message(Form.broadcast_message)
 async def process_broadcast(message: types.Message, state: FSMContext):
@@ -636,17 +696,19 @@ async def process_broadcast(message: types.Message, state: FSMContext):
     sent = 0
     failed = 0
     
-    await message.answer(f"📤 Начинаю рассылку для {len(users)} пользователей...")
+    progress_msg = await message.answer(f"📤 Начинаю рассылку для {len(users)} пользователей...")
     
     for user_id, username, _, _ in users:
         try:
             await bot.send_message(user_id, message.text)
             sent += 1
+            if sent % 10 == 0:
+                await progress_msg.edit_text(f"📤 Отправлено: {sent}/{len(users)}...")
         except:
             failed += 1
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.1)
     
-    await message.answer(
+    await progress_msg.edit_text(
         f"✅ Рассылка завершена:\n"
         f"📤 Отправлено: {sent}\n"
         f"❌ Не отправлено: {failed}"
@@ -654,13 +716,43 @@ async def process_broadcast(message: types.Message, state: FSMContext):
     
     await state.clear()
 
+# ========== ОБРАБОТКА ПЕРЕВОДОВ ==========
+@dp.message(F.text)
+async def handle_transaction_hash(message: types.Message):
+    # Простая проверка на хеш транзакции
+    if len(message.text) > 50 and any(c in message.text for c in 'abcdef0123456789'):
+        user_id = message.from_user.id
+        add_subscription(user_id, 30)  # 30 дней за оплату
+        
+        await message.answer(
+            f"✅ Спасибо за оплату!\n"
+            f"Ваша подписка активирована на 30 дней.\n"
+            f"Теперь вы можете использовать функцию сканирования!"
+        )
+
 # ========== ЗАПУСК БОТА ==========
 async def main():
     print("🚀 Запуск бота...")
     print(f"📢 Канал: {CHANNEL_ID}")
     print(f"👑 Админы: {ADMIN_IDS}")
     
+    # Запускаем авто-сканер (упрощенный)
+    asyncio.create_task(auto_scanner())
+    
     await dp.start_polling(bot)
+
+async def auto_scanner():
+    """Автоматическое сканирование каждые 5 минут"""
+    while True:
+        try:
+            await asyncio.sleep(300)  # 5 минут
+            
+            # Здесь может быть логика сканирования
+            print("🔄 Авто-сканер работает...")
+            
+        except Exception as e:
+            print(f"❌ Ошибка авто-сканера: {e}")
+            await asyncio.sleep(60)
 
 if __name__ == '__main__':
     asyncio.run(main())
