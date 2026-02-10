@@ -2,5 +2,3 @@ aiogram==3.13.0
 ccxt==4.2.85
 python-dotenv==1.0.1
 requests==2.31.0
-aiofiles==23.2.1
-pydantic==1.10.12
