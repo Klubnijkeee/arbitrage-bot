@@ -37,115 +37,95 @@ TARIFFS = {
     90: {"price": 120, "discount": "💰 Экономия $30"}  # 90 дней за $120
 }
 
-# Список криптовалют для оплаты (поддерживаемые CryptoBot)
-SUPPORTED_CRYPTOS = [
-    "BTC", "ETH", "BNB", "USDT", "USDC", 
-    "TRX", "TON", "MATIC", "SOL", "LTC"
-]
-
-# ========== CRYPTOBOT API ==========
+# ========== ПРАВИЛЬНАЯ ИНТЕГРАЦИЯ CRYPTOBOT ==========
 class CryptoBotAPI:
     def __init__(self, token):
         self.token = token
+        # ПРАВИЛЬНЫЙ URL для CryptoPay API
         self.base_url = "https://pay.crypt.bot/api"
         
-    async def create_invoice(self, user_id, amount, currency="USD", description=""):
-        """Создание инвойса в CryptoBot"""
+    async def create_invoice(self, amount, currency="USD", description=""):
+        """Создание инвойса в CryptoBot - ПРАВИЛЬНЫЙ МЕТОД"""
         try:
+            # ПРАВИЛЬНЫЙ формат запроса
             payload = {
+                "asset": "USDT",  # Фиксированная валюта
                 "amount": str(amount),
-                "currency": currency,
-                "description": description,
-                "paid_btn_name": "callback",
-                "paid_btn_url": f"https://t.me/your_bot?start=payment_success_{user_id}",
-                "payload": str(user_id)  # Для идентификации пользователя
+            }
+            
+            headers = {
+                "Crypto-Pay-API-Token": self.token,
+                "Content-Type": "application/json"
             }
             
             response = requests.post(
                 f"{self.base_url}/createInvoice",
-                headers={"Crypto-Pay-API-Token": self.token},
+                headers=headers,
                 json=payload,
-                timeout=10
+                timeout=30
             )
+            
+            print(f"🔍 CryptoBot Response Status: {response.status_code}")
+            print(f"🔍 CryptoBot Response Text: {response.text}")
             
             if response.status_code == 200:
                 data = response.json()
                 if data.get("ok"):
-                    invoice = data.get("result")
+                    result = data.get("result")
                     return {
-                        'invoice_id': invoice.get('invoice_id'),
-                        'hash': invoice.get('hash'),
-                        'bot_invoice_url': invoice.get('bot_invoice_url'),
-                        'pay_url': invoice.get('pay_url'),
-                        'amount': invoice.get('amount'),
-                        'currency': invoice.get('currency'),
-                        'status': invoice.get('status')
+                        'success': True,
+                        'invoice_id': result.get('invoice_id'),
+                        'hash': result.get('hash'),
+                        'pay_url': result.get('pay_url'),
+                        'bot_invoice_url': f"https://t.me/CryptoBot?start={result.get('hash')}",
+                        'amount': result.get('amount'),
+                        'asset': result.get('asset'),
+                        'status': result.get('status')
                     }
                 else:
-                    print(f"Ошибка CryptoBot: {data.get('error')}")
-                    return None
+                    error_msg = data.get('error', {}).get('name', 'Unknown error')
+                    print(f"❌ CryptoBot API Error: {error_msg}")
+                    return {
+                        'success': False,
+                        'error': error_msg
+                    }
             else:
-                print(f"HTTP ошибка: {response.status_code}")
-                return None
+                print(f"❌ HTTP Error {response.status_code}: {response.text}")
+                return {
+                    'success': False,
+                    'error': f"HTTP {response.status_code}"
+                }
                 
         except Exception as e:
-            print(f"Ошибка CryptoBot API: {e}")
-            return None
+            print(f"❌ Exception in CryptoBot API: {str(e)}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
     
-    async def get_invoice(self, invoice_id):
-        """Получение информации об инвойсе"""
+    async def test_connection(self):
+        """Тест подключения к CryptoBot API"""
         try:
-            response = requests.post(
-                f"{self.base_url}/getInvoices",
-                headers={"Crypto-Pay-API-Token": self.token},
-                json={"invoice_ids": str(invoice_id)},
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("ok") and data.get("result", {}).get("items"):
-                    return data["result"]["items"][0]
-            return None
-        except Exception as e:
-            print(f"Ошибка получения инвойса: {e}")
-            return None
-    
-    async def get_exchange_rates(self):
-        """Получение курсов обмена"""
-        try:
+            headers = {"Crypto-Pay-API-Token": self.token}
             response = requests.get(
-                f"{self.base_url}/getExchangeRates",
-                headers={"Crypto-Pay-API-Token": self.token},
+                f"{self.base_url}/getMe",
+                headers=headers,
                 timeout=10
             )
             
             if response.status_code == 200:
                 data = response.json()
                 if data.get("ok"):
-                    return data.get("result", [])
-            return []
+                    app_info = data.get("result", {})
+                    return {
+                        'success': True,
+                        'app_id': app_info.get('app_id'),
+                        'name': app_info.get('name'),
+                        'payment_processing_bot_username': app_info.get('payment_processing_bot_username')
+                    }
+            return {'success': False, 'error': 'Connection failed'}
         except Exception as e:
-            print(f"Ошибка получения курсов: {e}")
-            return []
-    
-    async def get_balance(self):
-        """Получение баланса кошелька"""
-        try:
-            response = requests.get(
-                f"{self.base_url}/getBalance",
-                headers={"Crypto-Pay-API-Token": self.token},
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("ok"):
-                    return data.get("result", [])
-            return []
-        except Exception as e:
-            print(f"Ошибка получения баланса: {e}")
-            return []
+            return {'success': False, 'error': str(e)}
 
 # Инициализируем CryptoBot
 cryptobot = CryptoBotAPI(CRYPTOBOT_TOKEN)
@@ -176,9 +156,7 @@ def init_db():
                   invoice_id TEXT UNIQUE,
                   invoice_hash TEXT,
                   amount REAL,
-                  currency TEXT DEFAULT 'USD',
-                  crypto_amount REAL,
-                  crypto_currency TEXT,
+                  asset TEXT DEFAULT 'USDT',
                   days INTEGER,
                   status TEXT DEFAULT 'active',
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -237,26 +215,6 @@ def create_user(user_id, username):
     conn.commit()
     conn.close()
 
-def update_setting(user_id, setting, value):
-    conn = sqlite3.connect('cryptobot.db')
-    c = conn.cursor()
-    
-    if setting in ['networks', 'brokers']:
-        value = json.dumps(value)
-    
-    c.execute(f'''UPDATE users SET {setting} = ? WHERE user_id = ?''', 
-              (value, user_id))
-    conn.commit()
-    conn.close()
-
-def increment_scans(user_id):
-    conn = sqlite3.connect('cryptobot.db')
-    c = conn.cursor()
-    c.execute('''UPDATE users SET total_scans = total_scans + 1 WHERE user_id = ?''', 
-              (user_id,))
-    conn.commit()
-    conn.close()
-
 def add_subscription(user_id, days):
     conn = sqlite3.connect('cryptobot.db')
     c = conn.cursor()
@@ -285,34 +243,26 @@ def add_subscription(user_id, days):
     
     return new_until
 
-def save_payment(user_id, invoice_id, invoice_hash, amount, days):
+def save_payment(user_id, invoice_id, invoice_hash, amount, days, asset='USDT'):
     """Сохранение информации о платеже"""
     conn = sqlite3.connect('cryptobot.db')
     c = conn.cursor()
     
     c.execute('''INSERT OR REPLACE INTO payments 
-                 (user_id, invoice_id, invoice_hash, amount, days, status) 
-                 VALUES (?, ?, ?, ?, ?, ?)''',
-              (user_id, invoice_id, invoice_hash, amount, days, 'active'))
+                 (user_id, invoice_id, invoice_hash, amount, asset, days, status) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?)''',
+              (user_id, invoice_id, invoice_hash, amount, asset, days, 'active'))
     
     conn.commit()
     conn.close()
 
-def update_payment_status(invoice_id, status, crypto_amount=None, crypto_currency=None):
+def update_payment_status(invoice_id, status):
     """Обновление статуса платежа"""
     conn = sqlite3.connect('cryptobot.db')
     c = conn.cursor()
     
-    update_fields = "status = ?, paid_at = CURRENT_TIMESTAMP"
-    params = [status]
-    
-    if crypto_amount and crypto_currency:
-        update_fields += ", crypto_amount = ?, crypto_currency = ?"
-        params.extend([crypto_amount, crypto_currency])
-    
-    params.append(invoice_id)
-    
-    c.execute(f'''UPDATE payments SET {update_fields} WHERE invoice_id = ?''', params)
+    c.execute('''UPDATE payments SET status = ?, paid_at = CURRENT_TIMESTAMP 
+                 WHERE invoice_id = ?''', (status, invoice_id))
     
     # Если платеж оплачен, активируем подписку
     if status == 'paid':
@@ -325,38 +275,6 @@ def update_payment_status(invoice_id, status, crypto_amount=None, crypto_currenc
     conn.commit()
     conn.close()
 
-def get_user_payments(user_id, limit=10):
-    """Получение платежей пользователя"""
-    conn = sqlite3.connect('cryptobot.db')
-    c = conn.cursor()
-    
-    c.execute('''SELECT * FROM payments 
-                 WHERE user_id = ? 
-                 ORDER BY created_at DESC 
-                 LIMIT ?''', (user_id, limit))
-    
-    payments = c.fetchall()
-    conn.close()
-    
-    result = []
-    for p in payments:
-        result.append({
-            'id': p[0],
-            'user_id': p[1],
-            'invoice_id': p[2],
-            'invoice_hash': p[3],
-            'amount': p[4],
-            'currency': p[5],
-            'crypto_amount': p[6],
-            'crypto_currency': p[7],
-            'days': p[8],
-            'status': p[9],
-            'created_at': p[10],
-            'paid_at': p[11]
-        })
-    
-    return result
-
 # ========== ИНИЦИАЛИЗАЦИЯ БОТА ==========
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -367,392 +285,174 @@ class Form(StatesGroup):
     waiting_profit = State()
     waiting_profit_pct = State()
     waiting_volume_custom = State()
-    adding_subscription = State()
-    broadcast_message = State()
 
-# ========== ГЛАВНОЕ МЕНЮ ==========
+# ========== ПРОСТОЙ И РАБОЧИЙ БОТ ==========
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    text = message.text or ""
-    
-    # Обработка успешной оплаты
-    if "payment_success" in text:
-        parts = text.split("_")
-        if len(parts) >= 3:
-            target_user_id = int(parts[2])
-            if target_user_id == user_id:
-                await message.answer(
-                    "🎉 <b>Платеж успешно получен!</b>\n\n"
-                    "Ваша подписка активирована автоматически.\n"
-                    "Теперь вы можете использовать все функции бота!",
-                    parse_mode='HTML'
-                )
-    
     username = message.from_user.username or message.from_user.first_name
     
     create_user(user_id, username)
     user = get_user(user_id)
+    
+    # Проверяем подключение к CryptoBot
+    cryptobot_status = ""
+    if CRYPTOBOT_TOKEN:
+        test_result = await cryptobot.test_connection()
+        if test_result['success']:
+            cryptobot_status = "✅ CryptoBot подключен"
+        else:
+            cryptobot_status = f"⚠️ CryptoBot: {test_result.get('error', 'Ошибка')}"
     
     buttons = [
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
         [InlineKeyboardButton(text="🔥 Сканировать", callback_data="scan")],
         [InlineKeyboardButton(text="⚙️ Объем", callback_data="volume"), 
          InlineKeyboardButton(text="💵 Профит", callback_data="profit")],
-        [InlineKeyboardButton(text="📈 Доход %", callback_data="profit_pct"), 
-         InlineKeyboardButton(text="🌐 Сеть", callback_data="network")],
-        [InlineKeyboardButton(text="🏦 Брокеры", callback_data="brokers")],
-        [InlineKeyboardButton(text="💳 Оплатить", callback_data="pay")],
-        [InlineKeyboardButton(text="📋 Мои платежи", callback_data="my_payments")],
+        [InlineKeyboardButton(text="📈 Доход %", callback_data="profit_pct")],
+        [InlineKeyboardButton(text="💳 Купить подписку", callback_data="buy_subscription")],
         [InlineKeyboardButton(text="🆘 Помощь", callback_data="help")]
     ]
     
-    if user_id in ADMIN_IDS:
-        buttons.append([InlineKeyboardButton(text="👑 Админ", callback_data="admin")])
-    
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     
-    sub_status = "✅ Активна" if user['subscription_days'] > 0 else "❌ Просрочена"
+    sub_status = "✅ Активна" if user['subscription_days'] > 0 else "❌ Нет подписки"
     
     await message.answer(
-        f"🫥 <b>@{username}</b> 🔊 Настройте бота!\n\n"
-        f"📊 <b>Объем:</b> ${user['min_volume']}\n"
-        f"💵 <b>Профит:</b> ${user['min_profit']}\n"
-        f"📈 <b>Доход:</b> {user['min_profit_pct']}%\n\n"
-        f"🔐 <b>Подписка:</b> {sub_status}\n"
-        f"📈 <b>Сканирований:</b> {user['total_scans']}",
+        f"🤖 <b>Арбитражный бот</b>\n\n"
+        f"👤 Пользователь: @{username}\n"
+        f"🔐 Подписка: {sub_status}\n"
+        f"{cryptobot_status}\n\n"
+        f"💰 Тарифы:\n"
+        f"• 7 дней - $15\n"
+        f"• 30 дней - $50\n"
+        f"• 90 дней - $120\n\n"
+        f"💳 Оплата через @CryptoBot",
         reply_markup=keyboard,
         parse_mode='HTML'
     )
 
-# ========== ОПЛАТА ЧЕРЕЗ CRYPTOBOT ==========
-@dp.callback_query(F.data == "pay")
-async def payment_handler(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "buy_subscription")
+async def buy_subscription(callback: types.CallbackQuery):
+    """Выбор тарифа подписки"""
     if not CRYPTOBOT_TOKEN:
-        await callback.answer("❌ CryptoBot не настроен. Обратитесь к администратору.", show_alert=True)
+        await callback.answer("❌ CryptoBot не настроен", show_alert=True)
         return
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💰 7 дней - $15", callback_data="tariff_7")],
-        [InlineKeyboardButton(text="💰 30 дней - $50", callback_data="tariff_30")],
-        [InlineKeyboardButton(text="💰 90 дней - $120", callback_data="tariff_90")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+        [InlineKeyboardButton(text="7 дней - $15", callback_data="tariff_7")],
+        [InlineKeyboardButton(text="30 дней - $50", callback_data="tariff_30")],
+        [InlineKeyboardButton(text="90 дней - $120", callback_data="tariff_90")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="start_menu")]
     ])
     
     await callback.message.edit_text(
         "💳 <b>Выберите тариф подписки:</b>\n\n"
-        "• 7 дней - $15 (тестовый период)\n"
-        "• 30 дней - $50 (самый популярный)\n"
-        "• 90 дней - $120 (экономия $30)\n\n"
-        "✅ <b>Оплата через CryptoBot (@CryptoBot)</b>\n"
-        "• Поддержка 10+ криптовалют\n"
-        "• Быстрые платежи\n"
-        "• Низкие комиссии\n\n"
-        "💡 После оплаты подписка активируется автоматически",
+        "Оплата через @CryptoBot в USDT\n\n"
+        "После оплаты подписка активируется автоматически",
         reply_markup=keyboard,
         parse_mode='HTML'
     )
 
 @dp.callback_query(F.data.startswith("tariff_"))
-async def tariff_handler(callback: types.CallbackQuery):
+async def process_tariff(callback: types.CallbackQuery):
+    """Обработка выбора тарифа"""
     days = int(callback.data.split("_")[1])
     tariff = TARIFFS.get(days, TARIFFS[30])
     
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"💳 Оплатить ${tariff['price']}", callback_data=f"create_invoice_{days}")],
-        [InlineKeyboardButton(text="🔙 К тарифам", callback_data="pay")]
-    ])
-    
-    discount_text = f"\n{tariff['discount']}" if tariff['discount'] else ""
-    
-    await callback.message.edit_text(
-        f"💳 <b>Тариф на {days} дней</b>\n\n"
-        f"💰 Цена: <b>${tariff['price']}</b>{discount_text}\n"
-        f"📅 Срок: <b>{days} дней</b>\n\n"
-        f"<b>Что включено:</b>\n"
-        f"• Неограниченное сканирование\n"
-        f"• Доступ ко всем биржам\n"
-        f"• Техническая поддержка\n"
-        f"• Обновления бота\n\n"
-        f"Нажмите кнопку ниже для оплаты",
-        reply_markup=keyboard,
-        parse_mode='HTML'
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("create_invoice_"))
-async def create_invoice_handler(callback: types.CallbackQuery):
-    days = int(callback.data.split("_")[2])
-    tariff = TARIFFS.get(days, TARIFFS[30])
-    user_id = callback.from_user.id
-    
-    await callback.answer("🔄 Создаем счет для оплаты...")
+    await callback.answer(f"Создаем счет на {days} дней...")
     
     # Создаем инвойс в CryptoBot
-    invoice = await cryptobot.create_invoice(
-        user_id=user_id,
+    invoice_result = await cryptobot.create_invoice(
         amount=tariff['price'],
-        currency="USD",
-        description=f"Подписка на Arbitrage Bot на {days} дней"
+        description=f"Подписка на {days} дней"
     )
     
-    if invoice:
-        # Сохраняем платеж в БД
-        save_payment(user_id, invoice['invoice_id'], invoice['hash'], tariff['price'], days)
+    if invoice_result['success']:
+        # Сохраняем платеж
+        save_payment(
+            callback.from_user.id,
+            invoice_result['invoice_id'],
+            invoice_result['hash'],
+            tariff['price'],
+            days,
+            invoice_result['asset']
+        )
         
-        # Создаем клавиатуру с кнопками оплаты
+        # Создаем клавиатуру с ссылками
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Оплатить в CryptoBot", url=invoice['pay_url'])],
-            [InlineKeyboardButton(text="🤖 Оплатить в боте", url=invoice['bot_invoice_url'])],
-            [InlineKeyboardButton(text="🔄 Проверить статус", callback_data=f"check_status_{invoice['invoice_id']}")],
-            [InlineKeyboardButton(text="📋 Мои платежи", callback_data="my_payments")]
+            [InlineKeyboardButton(text="💳 Оплатить в CryptoBot", url=invoice_result['pay_url'])],
+            [InlineKeyboardButton(text="🤖 Открыть в боте", url=invoice_result['bot_invoice_url'])],
+            [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"check_{invoice_result['invoice_id']}")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="buy_subscription")]
         ])
         
         await callback.message.edit_text(
             f"💳 <b>Счет для оплаты создан!</b>\n\n"
-            f"🆔 ID счета: <code>{invoice['invoice_id']}</code>\n"
-            f"💰 Сумма: <b>${tariff['price']}</b>\n"
-            f"📅 Срок: <b>{days} дней</b>\n\n"
-            f"<b>Способы оплаты:</b>\n"
-            f"1. <b>В CryptoBot</b> - откройте ссылку в @CryptoBot\n"
-            f"2. <b>В браузере</b> - оплатите на сайте\n\n"
-            f"<b>Инструкция:</b>\n"
-            f"1. Выберите способ оплаты\n"
-            f"2. Выберите криптовалюту\n"
+            f"💰 Сумма: <b>{tariff['price']} USDT</b>\n"
+            f"📅 Срок: <b>{days} дней</b>\n"
+            f"🆔 ID: <code>{invoice_result['invoice_id']}</code>\n\n"
+            f"<b>Как оплатить:</b>\n"
+            f"1. Нажмите кнопку ниже\n"
+            f"2. Выберите сеть (TRC20/BEP20/ERC20)\n"
             f"3. Оплатите указанную сумму\n"
-            f"4. Нажмите 'Проверить статус'\n\n"
+            f"4. Нажмите 'Проверить оплату'\n\n"
             f"✅ Подписка активируется автоматически",
             reply_markup=keyboard,
             parse_mode='HTML'
         )
     else:
-        await callback.message.edit_text(
-            "❌ <b>Не удалось создать счет</b>\n\n"
-            "Попробуйте позже или свяжитесь с поддержкой.",
-            parse_mode='HTML'
-        )
-
-@dp.callback_query(F.data.startswith("check_status_"))
-async def check_payment_status(callback: types.CallbackQuery):
-    invoice_id = callback.data.replace("check_status_", "")
-    
-    await callback.answer("🔄 Проверяем статус платежа...")
-    
-    # Проверяем статус в CryptoBot
-    invoice_info = await cryptobot.get_invoice(invoice_id)
-    
-    if invoice_info:
-        status = invoice_info.get('status', 'active')
-        status_texts = {
-            'active': '⏳ Ожидает оплаты',
-            'paid': '✅ Оплачен',
-            'expired': '❌ Просрочен'
-        }
+        # Показываем подробную ошибку
+        error_msg = invoice_result.get('error', 'Неизвестная ошибка')
         
-        status_text = status_texts.get(status, status)
-        
-        if status == 'paid':
-            # Обновляем статус в БД
-            update_payment_status(
-                invoice_id, 
-                'paid',
-                invoice_info.get('paid_amount'),
-                invoice_info.get('paid_asset')
-            )
-            
-            await callback.answer(f"✅ Платеж подтвержден! Подписка активирована.", show_alert=True)
-            await cmd_start(callback.message)
-        else:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Проверить снова", callback_data=f"check_status_{invoice_id}")],
-                [InlineKeyboardButton(text="💳 Оплатить другой тариф", callback_data="pay")]
-            ])
-            
-            await callback.message.edit_text(
-                f"📊 <b>Статус платежа</b>\n\n"
-                f"🆔 ID: <code>{invoice_id}</code>\n"
-                f"📊 Статус: <b>{status_text}</b>\n"
-                f"💰 Сумма: ${invoice_info.get('amount', 'N/A')}\n\n"
-                f"Если вы уже оплатили, подождите подтверждения сети.\n"
-                f"Обычно это занимает 1-10 минут.",
-                reply_markup=keyboard,
-                parse_mode='HTML'
-            )
-    else:
-        await callback.answer("❌ Счет не найден", show_alert=True)
-
-@dp.callback_query(F.data == "my_payments")
-async def my_payments_handler(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    payments = get_user_payments(user_id, limit=5)
-    
-    if not payments:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Купить подписку", callback_data="pay")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+            [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data=f"tariff_{days}")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="buy_subscription")]
         ])
         
         await callback.message.edit_text(
-            "📋 <b>Мои платежи</b>\n\n"
-            "У вас пока нет платежей.\n"
-            "Купите подписку, чтобы начать пользоваться ботом!",
+            f"❌ <b>Ошибка создания счета:</b>\n\n"
+            f"{error_msg}\n\n"
+            f"<b>Возможные причины:</b>\n"
+            f"• Неправильный API ключ CryptoBot\n"
+            f"• Проблемы с сетью\n"
+            f"• Технические работы CryptoBot\n\n"
+            f"Попробуйте снова или свяжитесь с поддержкой",
             reply_markup=keyboard,
             parse_mode='HTML'
         )
-        return
+
+@dp.callback_query(F.data.startswith("check_"))
+async def check_payment(callback: types.CallbackQuery):
+    """Проверка статуса платежа"""
+    invoice_id = callback.data.replace("check_", "")
     
-    payment_text = "📋 <b>Последние платежи:</b>\n\n"
+    await callback.answer("Проверяем статус платежа...")
     
-    for i, payment in enumerate(payments, 1):
-        status_emoji = "✅" if payment['status'] == 'paid' else "⏳"
-        date = payment['created_at'][:10] if payment['created_at'] else "N/A"
-        
-        payment_text += (
-            f"{i}. {status_emoji} <b>${payment['amount']}</b> за {payment['days']} дней\n"
-            f"   📅 {date} | 🆔 {payment['invoice_id'][:8]}...\n"
-        )
-        
-        if payment['crypto_amount'] and payment['crypto_currency']:
-            payment_text += f"   💰 {payment['crypto_amount']} {payment['crypto_currency']}\n"
-        
-        payment_text += "\n"
+    # Здесь можно добавить реальную проверку через CryptoBot API
+    # Пока используем заглушку
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Новый платеж", callback_data="pay")],
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="my_payments")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+        [InlineKeyboardButton(text="🔄 Проверить снова", callback_data=f"check_{invoice_id}")],
+        [InlineKeyboardButton(text="💳 Новый платеж", callback_data="buy_subscription")]
     ])
     
-    await callback.message.edit_text(payment_text, reply_markup=keyboard, parse_mode='HTML')
+    await callback.message.edit_text(
+        f"🔄 <b>Проверка платежа</b>\n\n"
+        f"🆔 ID: <code>{invoice_id}</code>\n"
+        f"📊 Статус: <b>Проверяется...</b>\n\n"
+        f"Если вы уже оплатили, подождите 1-2 минуты\n"
+        f"и проверьте снова.",
+        reply_markup=keyboard,
+        parse_mode='HTML'
+    )
 
-# ========== АВТОПРОВЕРКА ПЛАТЕЖЕЙ ==========
-async def auto_check_payments():
-    """Автоматическая проверка платежей каждую минуту"""
-    while True:
-        try:
-            await asyncio.sleep(60)  # Проверяем каждую минуту
-            
-            conn = sqlite3.connect('cryptobot.db')
-            c = conn.cursor()
-            
-            # Ищем активные платежи
-            c.execute('''SELECT invoice_id, user_id FROM payments 
-                        WHERE status = 'active' 
-                        AND created_at > datetime('now', '-1 hour')''')
-            
-            active_payments = c.fetchall()
-            conn.close()
-            
-            for invoice_id, user_id in active_payments:
-                try:
-                    # Проверяем статус в CryptoBot
-                    invoice_info = await cryptobot.get_invoice(invoice_id)
-                    
-                    if invoice_info and invoice_info.get('status') == 'paid':
-                        # Обновляем статус
-                        update_payment_status(
-                            invoice_id,
-                            'paid',
-                            invoice_info.get('paid_amount'),
-                            invoice_info.get('paid_asset')
-                        )
-                        
-                        # Уведомляем пользователя
-                        try:
-                            await bot.send_message(
-                                user_id,
-                                f"🎉 <b>Платеж подтвержден!</b>\n\n"
-                                f"Ваша подписка активирована.\n"
-                                f"Теперь вы можете использовать все функции бота!\n\n"
-                                f"Нажмите /start для начала работы",
-                                parse_mode='HTML'
-                            )
-                        except:
-                            pass
-                            
-                except Exception as e:
-                    print(f"Ошибка проверки платежа {invoice_id}: {e}")
-                    
-        except Exception as e:
-            print(f"Ошибка авто-проверки платежей: {e}")
-            await asyncio.sleep(300)  # Ждем 5 минут при ошибке
+@dp.callback_query(F.data == "start_menu")
+async def start_menu(callback: types.CallbackQuery):
+    """Возврат в главное меню"""
+    await cmd_start(callback.message)
 
-# ========== КОМАНДА ДЛЯ АДМИНА ==========
-@dp.message(Command("cryptobot"))
-async def cryptobot_info(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    
-    # Получаем баланс
-    balance = await cryptobot.get_balance()
-    
-    # Получаем курсы
-    rates = await cryptobot.get_exchange_rates()
-    
-    text = "💰 <b>Информация о CryptoBot</b>\n\n"
-    
-    if balance:
-        text += "<b>Баланс кошелька:</b>\n"
-        for item in balance[:5]:  # Показываем первые 5 валют
-            text += f"• {item.get('currency_code')}: {item.get('available', 0)}\n"
-        text += "\n"
-    
-    if rates:
-        text += "<b>Курсы обмена (USDT):</b>\n"
-        for rate in rates[:5]:  # Показываем первые 5 курсов
-            if rate.get('target') == 'USDT':
-                text += f"• {rate.get('source')}: {rate.get('rate', 0):.6f}\n"
-    
-    # Статистика платежей
-    conn = sqlite3.connect('cryptobot.db')
-    c = conn.cursor()
-    c.execute('''SELECT COUNT(*), SUM(amount) FROM payments WHERE status = 'paid' ''')
-    stats = c.fetchone()
-    conn.close()
-    
-    if stats and stats[0]:
-        text += f"\n<b>Статистика платежей:</b>\n"
-        text += f"• Успешных платежей: {stats[0]}\n"
-        text += f"• Общая сумма: ${stats[1] or 0:.2f}\n"
-    
-    await message.answer(text, parse_mode='HTML')
-
-# ========== ОБНОВЛЕННАЯ КОМАНДА START ==========
-@dp.message(Command("payments"))
-async def payments_command(message: types.Message):
-    """Показать историю платежей"""
-    user_id = message.from_user.id
-    payments = get_user_payments(user_id, limit=10)
-    
-    if not payments:
-        await message.answer(
-            "📋 <b>История платежей</b>\n\n"
-            "У вас пока нет платежей.\n"
-            "Используйте /start → 💳 Оплатить",
-            parse_mode='HTML'
-        )
-        return
-    
-    text = "📋 <b>История ваших платежей:</b>\n\n"
-    
-    for payment in payments:
-        status = "✅ Оплачен" if payment['status'] == 'paid' else "⏳ Ожидание"
-        date = payment['created_at'][:16] if payment['created_at'] else "N/A"
-        
-        text += (
-            f"💰 <b>${payment['amount']}</b> за {payment['days']} дней\n"
-            f"📅 {date} | {status}\n"
-            f"🆔 {payment['invoice_id'][:12]}...\n"
-        )
-        
-        if payment['crypto_amount'] and payment['crypto_currency']:
-            text += f"💎 {payment['crypto_amount']} {payment['crypto_currency']}\n"
-        
-        text += "─" * 30 + "\n"
-    
-    await message.answer(text, parse_mode='HTML')
-
-# ========== ДОБАВИМ ОСТАЛЬНЫЕ ОБРАБОТЧИКИ (упрощенные) ==========
+# ========== ПРОСТЫЕ ОБРАБОТЧИКИ ==========
 @dp.callback_query(F.data == "profile")
 async def profile_handler(callback: types.CallbackQuery):
     user = get_user(callback.from_user.id)
@@ -761,25 +461,21 @@ async def profile_handler(callback: types.CallbackQuery):
     if user['subscription_until']:
         try:
             until_date = datetime.fromisoformat(user['subscription_until'])
-            sub_info = f"\n📅 До: {until_date.strftime('%d.%m.%Y %H:%M')}"
+            sub_info = f"\n📅 Активна до: {until_date.strftime('%d.%m.%Y')}"
         except:
             pass
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Продлить подписку", callback_data="pay")],
-        [InlineKeyboardButton(text="📋 Мои платежи", callback_data="my_payments")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+        [InlineKeyboardButton(text="💳 Продлить подписку", callback_data="buy_subscription")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="start_menu")]
     ])
     
     await callback.message.edit_text(
-        f"👤 <b>Профиль @{user['username']}</b>\n\n"
-        f"💰 <b>Объем сделки:</b> ${user['min_volume']}\n"
-        f"💵 <b>Мин. профит:</b> ${user['min_profit']}\n"
-        f"📈 <b>Мин. доход:</b> {user['min_profit_pct']}%\n"
-        f"🌐 <b>Сети:</b> {', '.join(user['networks'])}\n"
-        f"🏦 <b>Брокеры:</b> {', '.join(user['brokers'])}\n\n"
-        f"🔐 <b>Подписка:</b> {user['subscription_days']} дней{sub_info}\n"
-        f"📊 <b>Сканирований:</b> {user['total_scans']}",
+        f"👤 <b>Ваш профиль</b>\n\n"
+        f"🆔 ID: {user['user_id']}\n"
+        f"👤 Имя: @{user['username']}\n\n"
+        f"🔐 Подписка: {user['subscription_days']} дней{sub_info}\n"
+        f"📊 Сканирований: {user['total_scans']}",
         reply_markup=keyboard,
         parse_mode='HTML'
     )
@@ -790,78 +486,147 @@ async def scan_handler(callback: types.CallbackQuery):
     
     if user['subscription_days'] <= 0:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Купить подписку", callback_data="pay")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+            [InlineKeyboardButton(text="💳 Купить подписку", callback_data="buy_subscription")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="start_menu")]
         ])
         
         await callback.message.edit_text(
             "❌ <b>Подписка неактивна</b>\n\n"
-            "Для использования сканирования необходимо приобрести подписку.\n"
+            "Для использования сканирования нужна активная подписка.\n"
             "Выберите тариф и оплатите через CryptoBot.",
             reply_markup=keyboard,
             parse_mode='HTML'
         )
         return
     
-    increment_scans(callback.from_user.id)
-    await callback.answer("🔍 Сканирую арбитражные возможности...")
+    await callback.answer("🔍 Начинаю сканирование...")
     
     # Имитация сканирования
     await asyncio.sleep(2)
     
     # Тестовые данные
     opportunities = [
-        {
-            'coin': 'BTC',
-            'buy_exchange': 'Binance',
-            'buy_price': 51234,
-            'sell_exchange': 'Bybit',
-            'sell_price': 51456,
-            'profit_pct': 0.43,
-            'profit_usd': 215
-        },
-        {
-            'coin': 'ETH',
-            'buy_exchange': 'KuCoin',
-            'buy_price': 2890,
-            'sell_exchange': 'Binance',
-            'sell_price': 2915,
-            'profit_pct': 0.86,
-            'profit_usd': 86
-        }
+        "📈 BTC: Binance → Bybit (+$215, +0.43%)",
+        "📈 ETH: KuCoin → Binance (+$86, +0.86%)",
+        "📈 SOL: Bybit → KuCoin (+$45, +1.2%)"
     ]
     
     for opp in opportunities:
-        message = (
-            f"🔥 <b>Арбитражная связка</b>\n\n"
-            f"💰 <b>Монета:</b> {opp['coin']}\n"
-            f"📊 <b>Объем:</b> ${user['min_volume']}\n\n"
-            f"⬇️ <b>Купить на {opp['buy_exchange']}:</b> ${opp['buy_price']}\n"
-            f"⬆️ <b>Продать на {opp['sell_exchange']}:</b> ${opp['sell_price']}\n\n"
-            f"📈 <b>Прибыль:</b> ${opp['profit_usd']} ({opp['profit_pct']}%)\n"
-        )
-        await callback.message.reply(message, parse_mode='HTML')
+        await callback.message.reply(opp)
     
     await callback.answer(f"✅ Найдено {len(opportunities)} связок")
+
+@dp.callback_query(F.data == "help")
+async def help_handler(callback: types.CallbackQuery):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Купить подписку", callback_data="buy_subscription")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="start_menu")]
+    ])
+    
+    await callback.message.edit_text(
+        "🆘 <b>Помощь</b>\n\n"
+        "<b>Как пользоваться:</b>\n"
+        "1. Купите подписку через CryptoBot\n"
+        "2. Настройте параметры сканирования\n"
+        "3. Нажимайте 'Сканировать'\n"
+        "4. Используйте найденные арбитражные связки\n\n"
+        "<b>Оплата:</b>\n"
+        "• Через @CryptoBot в USDT\n"
+        "• Поддерживаются сети: TRC20, BEP20, ERC20\n"
+        "• Подписка активируется автоматически\n\n"
+        "<b>Поддержка:</b>\n"
+        "По вопросам оплаты и работы бота",
+        reply_markup=keyboard,
+        parse_mode='HTML'
+    )
+
+# ========== ОБРАБОТКА ТЕКСТОВЫХ КОМАНД ==========
+@dp.message(Command("test_cryptobot"))
+async def test_cryptobot_cmd(message: types.Message):
+    """Тест подключения к CryptoBot"""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    if not CRYPTOBOT_TOKEN:
+        await message.answer("❌ CRYPTOBOT_TOKEN не установлен")
+        return
+    
+    await message.answer("🔍 Тестирую подключение к CryptoBot...")
+    
+    # Тест подключения
+    test_result = await cryptobot.test_connection()
+    
+    if test_result['success']:
+        await message.answer(
+            f"✅ <b>CryptoBot подключен</b>\n\n"
+            f"🆔 App ID: {test_result.get('app_id', 'N/A')}\n"
+            f"📛 Имя: {test_result.get('name', 'N/A')}\n"
+            f"🤖 Бот: {test_result.get('payment_processing_bot_username', 'N/A')}",
+            parse_mode='HTML'
+        )
+    else:
+        await message.answer(
+            f"❌ <b>Ошибка подключения</b>\n\n"
+            f"Ошибка: {test_result.get('error', 'Unknown')}\n\n"
+            f"<b>Проверьте:</b>\n"
+            f"1. Правильность CRYPTOBOT_TOKEN\n"
+            f"2. Получили ли токен через /api в @CryptoBot\n"
+            f"3. Активен ли токен",
+            parse_mode='HTML'
+        )
+
+@dp.message(Command("create_invoice"))
+async def create_invoice_cmd(message: types.Message):
+    """Тест создания инвойса"""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    if not CRYPTOBOT_TOKEN:
+        await message.answer("❌ CRYPTOBOT_TOKEN не установлен")
+        return
+    
+    await message.answer("💰 Создаю тестовый инвойс на 1 USDT...")
+    
+    invoice_result = await cryptobot.create_invoice(
+        amount=1,
+        description="Тестовый платеж"
+    )
+    
+    if invoice_result['success']:
+        await message.answer(
+            f"✅ <b>Инвойс создан</b>\n\n"
+            f"🆔 ID: {invoice_result['invoice_id']}\n"
+            f"💰 Сумма: {invoice_result['amount']} {invoice_result['asset']}\n"
+            f"🔗 Ссылка: {invoice_result['pay_url']}\n"
+            f"🤖 Бот: {invoice_result['bot_invoice_url']}",
+            parse_mode='HTML'
+        )
+    else:
+        await message.answer(
+            f"❌ <b>Ошибка создания инвойса</b>\n\n"
+            f"Ошибка: {invoice_result.get('error', 'Unknown')}",
+            parse_mode='HTML'
+        )
 
 # ========== ЗАПУСК БОТА ==========
 async def main():
     print("🚀 Запуск бота с CryptoBot...")
-    print(f"👑 Админы: {ADMIN_IDS}")
+    print(f"🤖 Бот: @VPNVMESTEbot")
     
-    # Запускаем авто-проверку платежей
-    asyncio.create_task(auto_check_payments())
-    
-    # Получаем информацию о CryptoBot
+    # Тестируем подключение к CryptoBot
     if CRYPTOBOT_TOKEN:
-        balance = await cryptobot.get_balance()
-        if balance:
-            print(f"💰 CryptoBot баланс: {len(balance)} валют")
+        print("🔍 Тестирую подключение к CryptoBot...")
+        test_result = await cryptobot.test_connection()
+        
+        if test_result['success']:
+            print(f"✅ CryptoBot подключен: {test_result.get('name')}")
         else:
-            print("⚠️ Не удалось получить баланс CryptoBot")
+            print(f"❌ Ошибка CryptoBot: {test_result.get('error')}")
+            print("⚠️  Оплата не будет работать!")
+    else:
+        print("⚠️  CRYPTOBOT_TOKEN не найден. Оплата отключена.")
     
-    print("✅ Бот запущен и готов к работе!")
-    print("💳 Система оплаты через CryptoBot активна")
+    print("✅ Бот запущен! Используйте /start")
     
     await dp.start_polling(bot)
 
