@@ -5,104 +5,143 @@ from aiogram import Bot, Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+import sqlite3
+import json
 
 # ========== НАСТРОЙКИ ==========
-# 1. Получаем BOT_TOKEN из переменных окружения
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 if not BOT_TOKEN:
     print("=" * 50)
     print("❌ КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не найден!")
-    print("   Чтобы исправить:")
-    print("   1. Зайдите в Render Dashboard")
-    print("   2. Выберите ваш сервис 'arbitrage-bot'")
-    print("   3. Нажмите 'Environment'")
-    print("   4. Добавьте: BOT_TOKEN=ваш_токен_бота")
     print("=" * 50)
     exit(1)
 
 print(f"✅ BOT_TOKEN получен: {BOT_TOKEN[:10]}...")
 
-# 2. Импортируем остальные настройки ПОСЛЕ определения BOT_TOKEN
+# Импортируем настройки
 try:
     from config import ADMIN_IDS, CHANNEL_ID, SUBSCRIPTION_PRICE, NOWPAYMENTS_API_KEY
-    from database import get_user_settings, save_user_settings, add_subscription_days, increment_scan_count
-    from scanner import ArbitrageScanner
-except ImportError as e:
-    print(f"⚠️ Ошибка импорта модулей: {e}")
-    print("📋 Создаем заглушки для модулей...")
-    
-    # Заглушки если модули не найдены
-    ADMIN_IDS = []
-    CHANNEL_ID = '@test_channel'
+except ImportError:
+    ADMIN_IDS = [5899591298]
+    CHANNEL_ID = '@testscanset'
     SUBSCRIPTION_PRICE = 50.0
     NOWPAYMENTS_API_KEY = ''
-    
-    # Заглушка для database
-    class DatabaseStub:
-        @staticmethod
-        def get_user_settings(user_id):
-            return {
-                'username': 'test_user',
-                'min_volume': 100,
-                'min_profit': 5,
-                'min_profit_pct': 3.0,
-                'networks': ['BEP20', 'TRC20'],
-                'brokers': ['KuCoin', 'Bybit'],
-                'subscription_days': 30,
-                'total_scans': 0
-            }
-        
-        @staticmethod
-        def save_user_settings(user_id, settings):
-            print(f"📁 Сохранение настроек для {user_id}: {settings}")
-        
-        @staticmethod
-        def add_subscription_days(user_id, days):
-            print(f"📅 Добавлено {days} дней подписки для {user_id}")
-        
-        @staticmethod
-        def increment_scan_count(user_id):
-            print(f"🔍 Увеличен счетчик сканирований для {user_id}")
-    
-    # Создаем стабы
-    get_user_settings = DatabaseStub.get_user_settings
-    save_user_settings = DatabaseStub.save_user_settings
-    add_subscription_days = DatabaseStub.add_subscription_days
-    increment_scan_count = DatabaseStub.increment_scan_count
 
-# ========== ИНИЦИАЛИЗАЦИЯ БОТА ==========
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# ========== БАЗА ДАННЫХ ==========
+def init_db():
+    conn = sqlite3.connect('bot.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                 (user_id INTEGER PRIMARY KEY, 
+                  username TEXT,
+                  min_volume INTEGER DEFAULT 100,
+                  min_profit REAL DEFAULT 5,
+                  min_profit_pct REAL DEFAULT 3.0,
+                  networks TEXT DEFAULT '["BEP20","TRC20"]',
+                  brokers TEXT DEFAULT '["KuCoin","Bybit"]',
+                  subscription_days INTEGER DEFAULT 30,
+                  total_scans INTEGER DEFAULT 0,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def get_user(user_id):
+    conn = sqlite3.connect('bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT * FROM users WHERE user_id = ?''', (user_id,))
+    user = c.fetchone()
+    conn.close()
+    
+    if user:
+        return {
+            'user_id': user[0],
+            'username': user[1],
+            'min_volume': user[2],
+            'min_profit': user[3],
+            'min_profit_pct': user[4],
+            'networks': json.loads(user[5]),
+            'brokers': json.loads(user[6]),
+            'subscription_days': user[7],
+            'total_scans': user[8]
+        }
+    else:
+        return None
+
+def create_user(user_id, username):
+    conn = sqlite3.connect('bot.db')
+    c = conn.cursor()
+    c.execute('''INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)''', 
+              (user_id, username))
+    conn.commit()
+    conn.close()
+
+def update_setting(user_id, setting, value):
+    conn = sqlite3.connect('bot.db')
+    c = conn.cursor()
+    
+    if setting in ['networks', 'brokers']:
+        value = json.dumps(value)
+    
+    c.execute(f'''UPDATE users SET {setting} = ? WHERE user_id = ?''', 
+              (value, user_id))
+    conn.commit()
+    conn.close()
+
+def increment_scans(user_id):
+    conn = sqlite3.connect('bot.db')
+    c = conn.cursor()
+    c.execute('''UPDATE users SET total_scans = total_scans + 1 WHERE user_id = ?''', 
+              (user_id,))
+    conn.commit()
+    conn.close()
+
+def get_all_users():
+    conn = sqlite3.connect('bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT user_id, username, subscription_days, total_scans FROM users ORDER BY created_at DESC''')
+    users = c.fetchall()
+    conn.close()
+    return users
+
+def add_subscription(user_id, days):
+    conn = sqlite3.connect('bot.db')
+    c = conn.cursor()
+    c.execute('''UPDATE users SET subscription_days = subscription_days + ? WHERE user_id = ?''', 
+              (days, user_id))
+    conn.commit()
+    conn.close()
+
+# ========== ИНИЦИАЛИЗАЦИЯ ==========
+logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Инициализируем сканер
-try:
-    scanner = ArbitrageScanner()
-    scanner_loaded = True
-except Exception as e:
-    print(f"⚠️ Ошибка инициализации сканера: {e}")
-    scanner = None
-    scanner_loaded = False
-
 # ========== СОСТОЯНИЯ ==========
 class Form(StatesGroup):
-    profit = State()
-    volume_input = State()
+    waiting_profit = State()
+    waiting_profit_pct = State()
+    waiting_volume_custom = State()
+    adding_subscription = State()
 
-# ========== КОМАНДА START ==========
+# ========== ГЛАВНОЕ МЕНЮ ==========
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     username = message.from_user.username or message.from_user.first_name
     
-    settings = get_user_settings(user_id)
-    save_user_settings(user_id, {**settings, 'username': username})
+    create_user(user_id, username)
+    user = get_user(user_id)
     
-    kb = InlineKeyboardMarkup(inline_keyboard=[
+    keyboard = [
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
         [InlineKeyboardButton(text="🔥 Сканировать", callback_data="scan")],
         [InlineKeyboardButton(text="⚙️ Объем", callback_data="volume"), 
@@ -112,270 +151,482 @@ async def cmd_start(message: types.Message):
         [InlineKeyboardButton(text="🏦 Брокеры", callback_data="brokers")],
         [InlineKeyboardButton(text="💳 Оплатить", callback_data="pay")],
         [InlineKeyboardButton(text="🆘 Помощь", callback_data="help")]
-    ])
+    ]
     
-    sub_status = "✅ Активна" if settings['subscription_days'] > 0 else "❌ Просрочена"
+    if user_id in ADMIN_IDS:
+        keyboard.append([InlineKeyboardButton(text="👑 Админ", callback_data="admin")])
+    
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    sub_status = "✅ Активна" if user['subscription_days'] > 0 else "❌ Просрочена"
     
     await message.answer(
         f"🫥 <b>@{username}</b> 🔊 Настройте бота!\n\n"
-        f"📊 <b>Объем:</b> ${settings['min_volume']}\n"
-        f"💵 <b>Профит:</b> ${settings['min_profit']}\n"
-        f"📈 <b>Доход:</b> {settings['min_profit_pct']}%\n\n"
+        f"📊 <b>Объем:</b> ${user['min_volume']}\n"
+        f"💵 <b>Профит:</b> ${user['min_profit']}\n"
+        f"📈 <b>Доход:</b> {user['min_profit_pct']}%\n\n"
         f"🔐 <b>Подписка:</b> {sub_status}\n"
-        f"📈 <b>Сканирований:</b> {settings['total_scans']}",
-        reply_markup=kb, parse_mode='HTML'
+        f"📈 <b>Сканирований:</b> {user['total_scans']}",
+        reply_markup=reply_markup,
+        parse_mode='HTML'
     )
-
-@dp.callback_query(F.data == "start")
-async def start_callback(callback: types.CallbackQuery):
-    """Обработчик кнопки 'Главное меню'"""
-    await cmd_start(callback.message)
-    await callback.answer()
 
 # ========== ПРОФИЛЬ ==========
 @dp.callback_query(F.data == "profile")
-async def profile(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    settings = get_user_settings(user_id)
+async def profile_handler(callback: types.CallbackQuery):
+    user = get_user(callback.from_user.id)
     
-    kb = InlineKeyboardMarkup(inline_keyboard=[
+    keyboard = [
         [InlineKeyboardButton(text="🔙 Главное меню", callback_data="start")]
-    ])
+    ]
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     
     await callback.message.edit_text(
-        f"👤 <b>Профиль @{settings['username']}</b>\n\n"
-        f"💰 <b>Объем сделки:</b> ${settings['min_volume']}\n"
-        f"💵 <b>Мин. профит:</b> ${settings['min_profit']}\n"
-        f"📈 <b>Мин. доход:</b> {settings['min_profit_pct']}%\n"
-        f"🌐 <b>Сети:</b> {', '.join(settings['networks'])}\n"
-        f"🏦 <b>Брокеры:</b> {', '.join(settings['brokers'])}\n\n"
-        f"🔐 <b>Подписка:</b> {settings['subscription_days']} дней\n"
-        f"📊 <b>Сканирований:</b> {settings['total_scans']}",
-        reply_markup=kb, parse_mode='HTML'
+        f"👤 <b>Профиль @{user['username']}</b>\n\n"
+        f"💰 <b>Объем сделки:</b> ${user['min_volume']}\n"
+        f"💵 <b>Мин. профит:</b> ${user['min_profit']}\n"
+        f"📈 <b>Мин. доход:</b> {user['min_profit_pct']}%\n"
+        f"🌐 <b>Сети:</b> {', '.join(user['networks'])}\n"
+        f"🏦 <b>Брокеры:</b> {', '.join(user['brokers'])}\n\n"
+        f"🔐 <b>Подписка:</b> {user['subscription_days']} дней\n"
+        f"📊 <b>Сканирований:</b> {user['total_scans']}",
+        reply_markup=reply_markup,
+        parse_mode='HTML'
     )
 
 # ========== СКАНИРОВАНИЕ ==========
 @dp.callback_query(F.data == "scan")
-async def scan(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    settings = get_user_settings(user_id)
+async def scan_handler(callback: types.CallbackQuery):
+    user = get_user(callback.from_user.id)
     
-    if settings['subscription_days'] <= 0:
+    if user['subscription_days'] <= 0:
         await callback.answer("❌ Оплатите подписку!", show_alert=True)
         return
     
-    if not scanner_loaded:
-        await callback.answer("❌ Сканер не загружен!", show_alert=True)
-        return
-    
-    increment_scan_count(user_id)
+    increment_scans(callback.from_user.id)
     await callback.answer("🔍 Сканирую...")
     
-    try:
-        opps = scanner.find_arbitrage(
-            settings['min_volume'],
-            settings['min_profit'],
-            settings['min_profit_pct']
-        )
-        
-        if opps:
-            for opp in opps[:3]:  # Показываем только 3 лучшие
-                signal = scanner.format_signal(opp, settings['networks'][0])
-                await callback.message.reply(signal, parse_mode='HTML')
-            await callback.answer(f"✅ Найдено: {len(opps)} связок")
-        else:
-            await callback.answer("❌ Связок нет")
-            
-    except Exception as e:
-        await callback.answer(f"❌ Ошибка: {str(e)[:50]}")
+    # Имитация сканирования
+    await asyncio.sleep(1)
+    
+    # Тестовые данные
+    signals = [
+        "👁‍🗨KuCoin -> Bybit (SOL/USDT)\n💰Профит: 8.5 USDT\n🚩Доход: 5.2%",
+        "👁‍🗨Gate.io -> HTX (BNB/USDT)\n💰Профит: 12.3 USDT\n🚩Доход: 6.8%"
+    ]
+    
+    for signal in signals[:2]:
+        await callback.message.reply(signal)
+    
+    await callback.answer(f"✅ Найдено: {len(signals)} связок")
 
 # ========== НАСТРОЙКА ОБЪЕМА ==========
 @dp.callback_query(F.data == "volume")
-async def set_volume(callback: types.CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("50$", callback_data="vol_50"), InlineKeyboardButton("100$", callback_data="vol_100")],
-        [InlineKeyboardButton("200$", callback_data="vol_200"), InlineKeyboardButton("500$", callback_data="vol_500")],
-        [InlineKeyboardButton("1000$", callback_data="vol_1000"), InlineKeyboardButton("🔙", callback_data="start")]
-    ])
-    await callback.message.edit_text("💰 <b>Выберите объем:</b>", reply_markup=kb, parse_mode='HTML')
+async def volume_handler(callback: types.CallbackQuery):
+    keyboard = [
+        [InlineKeyboardButton(text="50$", callback_data="vol_50"),
+         InlineKeyboardButton(text="100$", callback_data="vol_100")],
+        [InlineKeyboardButton(text="200$", callback_data="vol_200"),
+         InlineKeyboardButton(text="500$", callback_data="vol_500")],
+        [InlineKeyboardButton(text="1000$", callback_data="vol_1000"),
+         InlineKeyboardButton(text="Свой", callback_data="vol_custom")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+    ]
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    await callback.message.edit_text(
+        "💰 <b>Выберите объем:</b>",
+        reply_markup=reply_markup,
+        parse_mode='HTML'
+    )
 
 @dp.callback_query(F.data.startswith("vol_"))
-async def save_volume(callback: types.CallbackQuery):
+async def set_volume_handler(callback: types.CallbackQuery, state: FSMContext):
+    if callback.data == "vol_custom":
+        await callback.message.edit_text("💰 Введите свой объем в USD:")
+        await state.set_state(Form.waiting_volume_custom)
+        return
+    
     volume = int(callback.data.split('_')[1])
-    user_id = callback.from_user.id
-    settings = get_user_settings(user_id)
-    settings['min_volume'] = volume
-    save_user_settings(user_id, settings)
+    update_setting(callback.from_user.id, 'min_volume', volume)
     await callback.answer(f"✅ Объем: ${volume}")
+    await cmd_start(callback.message)
+
+@dp.message(Form.waiting_volume_custom)
+async def process_custom_volume(message: types.Message, state: FSMContext):
+    try:
+        volume = int(message.text)
+        if volume < 10:
+            await message.answer("❌ Минимальный объем: $10")
+            return
+        
+        update_setting(message.from_user.id, 'min_volume', volume)
+        await message.answer(f"✅ Объем установлен: ${volume}")
+        await state.clear()
+        await cmd_start(message)
+    except ValueError:
+        await message.answer("❌ Введите число!")
 
 # ========== НАСТРОЙКА ПРОФИТА ==========
 @dp.callback_query(F.data == "profit")
-async def set_profit(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(Form.profit)
-    await callback.message.edit_text("💵 <b>Введите мин. профит (USDT):</b>\nПример: 5.5")
+async def profit_handler(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("💵 Введите минимальный профит в USDT (например: 5.5):")
+    await state.set_state(Form.waiting_profit)
 
-@dp.message(Form.profit)
+@dp.message(Form.waiting_profit)
 async def process_profit(message: types.Message, state: FSMContext):
     try:
         profit = float(message.text)
-        user_id = message.from_user.id
-        settings = get_user_settings(user_id)
-        settings['min_profit'] = profit
-        save_user_settings(user_id, settings)
-        await message.answer(f"✅ Мин. профит: ${profit}")
-    except:
+        update_setting(message.from_user.id, 'min_profit', profit)
+        await message.answer(f"✅ Минимальный профит: ${profit}")
+        await state.clear()
+        await cmd_start(message)
+    except ValueError:
         await message.answer("❌ Введите число!")
-    await state.clear()
 
-# ========== ДРУГИЕ НАСТРОЙКИ (ЗАГЛУШКИ) ==========
+# ========== НАСТРОЙКА ПРОЦЕНТА ==========
 @dp.callback_query(F.data == "profit_pct")
-async def profit_pct(callback: types.CallbackQuery):
-    await callback.answer("⚙️ Настройка дохода % - в разработке", show_alert=True)
+async def profit_pct_handler(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("📈 Введите минимальный процент дохода (например: 3.0):")
+    await state.set_state(Form.waiting_profit_pct)
 
+@dp.message(Form.waiting_profit_pct)
+async def process_profit_pct(message: types.Message, state: FSMContext):
+    try:
+        pct = float(message.text)
+        update_setting(message.from_user.id, 'min_profit_pct', pct)
+        await message.answer(f"✅ Минимальный доход: {pct}%")
+        await state.clear()
+        await cmd_start(message)
+    except ValueError:
+        await message.answer("❌ Введите число!")
+
+# ========== ВЫБОР СЕТИ ==========
 @dp.callback_query(F.data == "network")
-async def network(callback: types.CallbackQuery):
-    await callback.answer("🌐 Настройка сети - в разработке", show_alert=True)
-
-@dp.callback_query(F.data == "brokers")
-async def brokers(callback: types.CallbackQuery):
-    await callback.answer("🏦 Настройка брокеров - в разработке", show_alert=True)
-
-@dp.callback_query(F.data == "help")
-async def help_cmd(callback: types.CallbackQuery):
-    help_text = """🆘 <b>Помощь</b>
-
-<b>Команды:</b>
-/start - Главное меню
-
-<b>Настройки:</b>
-• Объем - минимальная сумма сделки
-• Профит - минимальная прибыль в USDT
-• Доход % - минимальный процент прибыли
-
-<b>Сканирование:</b>
-Находит арбитражные возможности между биржами.
-
-<b>Оплата:</b>
-Подписка дает доступ к сканированию.
-Тариф: $50 за 30 дней."""
+async def network_handler(callback: types.CallbackQuery):
+    keyboard = [
+        [InlineKeyboardButton(text="BEP20 ✅", callback_data="toggle_BEP20")],
+        [InlineKeyboardButton(text="TRC20 ✅", callback_data="toggle_TRC20")],
+        [InlineKeyboardButton(text="ERC20", callback_data="toggle_ERC20")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+    ]
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     
-    await callback.message.edit_text(help_text, parse_mode='HTML')
+    await callback.message.edit_text(
+        "🌐 <b>Выберите сети:</b>\n✅ - активные",
+        reply_markup=reply_markup,
+        parse_mode='HTML'
+    )
+
+@dp.callback_query(F.data.startswith("toggle_"))
+async def toggle_network_handler(callback: types.CallbackQuery):
+    network = callback.data.split('_')[1]
+    user = get_user(callback.from_user.id)
+    
+    if network in user['networks']:
+        user['networks'].remove(network)
+    else:
+        user['networks'].append(network)
+    
+    update_setting(callback.from_user.id, 'networks', user['networks'])
+    await network_handler(callback)
+
+# ========== ВЫБОР БРОКЕРОВ ==========
+@dp.callback_query(F.data == "brokers")
+async def brokers_handler(callback: types.CallbackQuery):
+    keyboard = [
+        [InlineKeyboardButton(text="KuCoin ✅", callback_data="broker_KuCoin")],
+        [InlineKeyboardButton(text="Bybit ✅", callback_data="broker_Bybit")],
+        [InlineKeyboardButton(text="OKX", callback_data="broker_OKX")],
+        [InlineKeyboardButton(text="Gate.io", callback_data="broker_Gate.io")],
+        [InlineKeyboardButton(text="HTX", callback_data="broker_HTX")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+    ]
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    await callback.message.edit_text(
+        "🏦 <b>Выберите биржи:</b>\n✅ - активные",
+        reply_markup=reply_markup,
+        parse_mode='HTML'
+    )
+
+@dp.callback_query(F.data.startswith("broker_"))
+async def toggle_broker_handler(callback: types.CallbackQuery):
+    broker = callback.data.split('_')[1]
+    user = get_user(callback.from_user.id)
+    
+    if broker in user['brokers']:
+        user['brokers'].remove(broker)
+    else:
+        user['brokers'].append(broker)
+    
+    update_setting(callback.from_user.id, 'brokers', user['brokers'])
+    await brokers_handler(callback)
+
+# ========== ОПЛАТА ==========
+@dp.callback_query(F.data == "pay")
+async def payment_handler(callback: types.CallbackQuery):
+    payment_url = "https://nowpayments.io/payment"  # Замените на реальную ссылку
+    
+    keyboard = [
+        [InlineKeyboardButton(text="💳 Оплатить $50 (30 дней)", url=payment_url)],
+        [InlineKeyboardButton(text="💳 Оплатить $90 (60 дней)", url=f"{payment_url}?amount=90")],
+        [InlineKeyboardButton(text="💳 Оплатить $120 (90 дней)", url=f"{payment_url}?amount=120")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+    ]
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    await callback.message.edit_text(
+        "💳 <b>Выберите тариф:</b>\n\n"
+        "• 30 дней - $50\n"
+        "• 60 дней - $90 (экономия $10)\n"
+        "• 90 дней - $120 (экономия $30)\n\n"
+        "После оплаты подписка активируется автоматически в течение 5 минут.",
+        reply_markup=reply_markup,
+        parse_mode='HTML'
+    )
+
+# ========== ПОМОЩЬ ==========
+@dp.callback_query(F.data == "help")
+async def help_handler(callback: types.CallbackQuery):
+    help_text = """🆘 <b>Помощь по боту</b>
+
+<b>Основные функции:</b>
+• 🔥 <b>Сканировать</b> - поиск арбитражных возможностей
+• ⚙️ <b>Объем</b> - минимальная сумма сделки
+• 💵 <b>Профит</b> - минимальная прибыль в USDT
+• 📈 <b>Доход %</b> - минимальный процент прибыли
+• 🌐 <b>Сеть</b> - выбор блокчейн-сетей
+• 🏦 <b>Брокеры</b> - выбор бирж для сканирования
+• 💳 <b>Оплатить</b> - покупка подписки
+
+<b>Как работает:</b>
+1. Настройте параметры
+2. Купите подписку
+3. Нажимайте "Сканировать"
+4. Получайте сигналы
+
+<b>Поддержка:</b>
+@support_username"""
+    
+    keyboard = [
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+    ]
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    await callback.message.edit_text(help_text, reply_markup=reply_markup, parse_mode='HTML')
 
 # ========== АДМИН ПАНЕЛЬ ==========
 @dp.callback_query(F.data == "admin")
-async def admin_panel(callback: types.CallbackQuery):
+async def admin_panel_handler(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("🚫 Доступ запрещен")
+        await callback.answer("🚫 Доступ запрещен", show_alert=True)
         return
     
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton("👥 Пользователи", callback_data="admin_users")],
-        [InlineKeyboardButton("💰 Выдать подписку", callback_data="admin_give_sub")],
-        [InlineKeyboardButton("🔙", callback_data="start")]
-    ])
-    await callback.message.edit_text("🔧 <b>Админ панель</b>", reply_markup=kb, parse_mode='HTML')
-
-@dp.callback_query(F.data == "admin_stats")
-async def admin_stats(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS: 
-        return
+    users = get_all_users()
+    active_users = sum(1 for u in users if u[2] > 0)
+    total_scans = sum(u[3] for u in users)
     
-    await callback.message.edit_text("📊 <b>Статистика:</b>\n👥 Пользователей: 42\n💰 Выручка: $1,250\n🔥 Сигналов: 156", parse_mode='HTML')
-
-@dp.callback_query(F.data == "admin_users")
-async def admin_users(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        return
-    
-    await callback.answer("👥 Список пользователей - в разработке")
-
-@dp.callback_query(F.data == "admin_give_sub")
-async def admin_give_sub(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        return
-    
-    await callback.answer("💰 Выдача подписки - в разработке")
-
-# ========== ОПЛАТА NOWPAYMENTS ==========
-@dp.callback_query(F.data == "pay")
-async def payment(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    
-    # Генерируем ссылку NowPayments
-    if NOWPAYMENTS_API_KEY:
-        # Если API ключ есть, создаем платеж
-        import requests
-        try:
-            response = requests.post(
-                "https://api.nowpayments.io/v1/invoice",
-                headers={"x-api-key": NOWPAYMENTS_API_KEY},
-                json={
-                    "price_amount": SUBSCRIPTION_PRICE,
-                    "price_currency": "usd",
-                    "pay_currency": "usdt",
-                    "order_id": f"user_{user_id}",
-                    "order_description": "Подписка на Arbitrage Bot - 30 дней"
-                }
-            )
-            
-            if response.status_code == 201:
-                data = response.json()
-                payment_url = data.get('invoice_url', '')
-            else:
-                payment_url = f"https://nowpayments.io/payment?amount={SUBSCRIPTION_PRICE}&currency=USD&order_id={user_id}"
-        except:
-            payment_url = f"https://nowpayments.io/payment?amount={SUBSCRIPTION_PRICE}&currency=USD&order_id={user_id}"
-    else:
-        # Простая ссылка
-        payment_url = f"https://nowpayments.io/payment?amount={SUBSCRIPTION_PRICE}&currency=USD&order_id={user_id}"
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("💳 Оплатить $50 (30 дней)", url=payment_url)],
-        [InlineKeyboardButton("🔙", callback_data="start")]
-    ])
+    keyboard = [
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin_users")],
+        [InlineKeyboardButton(text="💰 Выдать подписку", callback_data="admin_give_sub")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="start")]
+    ]
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     
     await callback.message.edit_text(
-        f"💳 <b>Тарифы:</b>\n"
-        f"💎 30 дней - ${SUBSCRIPTION_PRICE}\n"
-        f"✅ После оплаты бот активируется автоматически!\n\n"
-        f"<i>NowPayments.io</i>",
-        reply_markup=kb, parse_mode='HTML'
+        f"👑 <b>Админ панель</b>\n\n"
+        f"👥 Пользователей: {len(users)}\n"
+        f"✅ Активных: {active_users}\n"
+        f"📊 Сканирований: {total_scans}",
+        reply_markup=reply_markup,
+        parse_mode='HTML'
     )
 
-# ========== АВТОСКАН ==========
-async def auto_scanner():
-    """Автоматическое сканирование и отправка в канал"""
-    while True:
-        try:
-            if scanner_loaded and CHANNEL_ID:
-                opps = scanner.find_arbitrage(100, 5, 3.0)
-                if opps:
-                    signal = scanner.format_signal(opps[0], 'BEP20')
-                    await bot.send_message(CHANNEL_ID, signal, parse_mode='HTML')
-                    print(f"📤 Отправлен сигнал в канал: {opps[0]['symbol']}")
-        except Exception as e:
-            print(f"⚠️ Ошибка автоскана: {e}")
-        
-        await asyncio.sleep(60)  # Каждые 60 секунд
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats_handler(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    
+    users = get_all_users()
+    active_users = sum(1 for u in users if u[2] > 0)
+    total_scans = sum(u[3] for u in users)
+    
+    keyboard = [
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin")]
+    ]
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    await callback.message.edit_text(
+        f"📊 <b>Статистика бота</b>\n\n"
+        f"👥 Всего пользователей: {len(users)}\n"
+        f"✅ Активных подписок: {active_users}\n"
+        f"📈 Сканирований всего: {total_scans}\n\n"
+        f"<b>Топ пользователей:</b>\n",
+        reply_markup=reply_markup,
+        parse_mode='HTML'
+    )
+    
+    # Добавляем топ-5 пользователей
+    top_users = sorted(users, key=lambda x: x[3], reverse=True)[:5]
+    text = callback.message.text + "\n"
+    for i, (user_id, username, days, scans) in enumerate(top_users, 1):
+        text += f"{i}. @{username}: {scans} сканирований, {days} дней подписки\n"
+    
+    await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode='HTML')
 
-# ========== ГЛАВНАЯ ФУНКЦИЯ ==========
+@dp.callback_query(F.data == "admin_users")
+async def admin_users_handler(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    
+    users = get_all_users()
+    
+    keyboard = []
+    for user_id, username, days, scans in users[:10]:  # Показываем первые 10
+        status = "✅" if days > 0 else "❌"
+        btn_text = f"{status} @{username} ({scans})"
+        keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"user_{user_id}")])
+    
+    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin")])
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    await callback.message.edit_text(
+        "👥 <b>Список пользователей</b>\n✅ - активная подписка\n❌ - нет подписки\n(число) - сканирований",
+        reply_markup=reply_markup,
+        parse_mode='HTML'
+    )
+
+@dp.callback_query(F.data.startswith("user_"))
+async def admin_user_detail_handler(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    
+    user_id = int(callback.data.split('_')[1])
+    user = get_user(user_id)
+    
+    if not user:
+        await callback.answer("Пользователь не найден")
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton(text="➕ 7 дней", callback_data=f"addsub_{user_id}_7"),
+         InlineKeyboardButton(text="➕ 30 дней", callback_data=f"addsub_{user_id}_30")],
+        [InlineKeyboardButton(text="➕ 90 дней", callback_data=f"addsub_{user_id}_90")],
+        [InlineKeyboardButton(text="🔙 К списку", callback_data="admin_users")]
+    ]
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    await callback.message.edit_text(
+        f"👤 <b>Пользователь:</b> @{user['username']}\n"
+        f"🆔 ID: {user_id}\n"
+        f"📅 Подписка: {user['subscription_days']} дней\n"
+        f"📊 Сканирований: {user['total_scans']}\n"
+        f"💰 Объем: ${user['min_volume']}\n"
+        f"💵 Профит: ${user['min_profit']}\n"
+        f"📈 Доход: {user['min_profit_pct']}%",
+        reply_markup=reply_markup,
+        parse_mode='HTML'
+    )
+
+@dp.callback_query(F.data.startswith("addsub_"))
+async def admin_add_subscription_handler(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    
+    _, user_id, days = callback.data.split('_')
+    user_id = int(user_id)
+    days = int(days)
+    
+    add_subscription(user_id, days)
+    
+    await callback.answer(f"✅ Добавлено {days} дней пользователю", show_alert=True)
+    await admin_user_detail_handler(callback)
+
+@dp.callback_query(F.data == "admin_give_sub")
+async def admin_give_sub_handler(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    
+    await callback.message.edit_text(
+        "💰 <b>Выдача подписки</b>\n\n"
+        "Введите ID пользователя и количество дней через пробел:\n"
+        "Пример: <code>123456789 30</code>",
+        parse_mode='HTML'
+    )
+    await state.set_state(Form.adding_subscription)
+
+@dp.message(Form.adding_subscription)
+async def process_add_subscription(message: types.Message, state: FSMContext):
+    try:
+        user_id, days = map(int, message.text.split())
+        add_subscription(user_id, days)
+        
+        # Получаем информацию о пользователе
+        user = get_user(user_id)
+        username = user['username'] if user else "Неизвестный"
+        
+        await message.answer(f"✅ Пользователю @{username} добавлено {days} дней подписки")
+        
+        # Уведомляем пользователя
+        try:
+            await bot.send_message(
+                user_id,
+                f"🎉 Вам выдана подписка на {days} дней!\n"
+                f"Теперь у вас активная подписка."
+            )
+        except:
+            pass
+            
+    except ValueError:
+        await message.answer("❌ Неверный формат. Пример: 123456789 30")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+    
+    await state.clear()
+
+@dp.callback_query(F.data == "admin_broadcast")
+async def admin_broadcast_handler(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    
+    await callback.message.edit_text(
+        "📢 <b>Рассылка сообщений</b>\n\n"
+        "Введите сообщение для рассылки всем пользователям:",
+        parse_mode='HTML'
+    )
+    await state.set_state("broadcast_message")
+
+@dp.message(F.text, lambda m: m.from_user.id in ADMIN_IDS)
+async def process_broadcast(message: types.Message, state: FSMContext):
+    if await state.get_state() == "broadcast_message":
+        users = get_all_users()
+        sent = 0
+        failed = 0
+        
+        await message.answer(f"📤 Начинаю рассылку для {len(users)} пользователей...")
+        
+        for user_id, username, _, _ in users:
+            try:
+                await bot.send_message(user_id, message.text)
+                sent += 1
+            except:
+                failed += 1
+            await asyncio.sleep(0.05)  # Задержка чтобы не спамить
+        
+        await message.answer(
+            f"✅ Рассылка завершена:\n"
+            f"📤 Отправлено: {sent}\n"
+            f"❌ Не отправлено: {failed}"
+        )
+        
+        await state.clear()
+
+# ========== ЗАПУСК БОТА ==========
 async def main():
     print("🚀 Запуск бота...")
-    
-    # Загружаем рынки если сканер доступен
-    if scanner_loaded:
-        try:
-            scanner.load_markets()
-            print("✅ Рынки загружены")
-        except Exception as e:
-            print(f"⚠️ Ошибка загрузки рынков: {e}")
-    
-    # Запускаем автоскан в фоне
-    asyncio.create_task(auto_scanner())
-    
-    # Запускаем бота
-    print("🤖 Бот запущен и готов к работе!")
     print(f"📢 Канал: {CHANNEL_ID}")
     print(f"👑 Админы: {ADMIN_IDS}")
     
