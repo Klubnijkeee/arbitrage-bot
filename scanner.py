@@ -12,7 +12,7 @@ class ArbitrageScanner:
             'bybit': ccxt.bybit({'enableRateLimit': True, 'timeout': 20000, 'options': {'defaultType': 'spot'}}),
             'okx': ccxt.okx({'enableRateLimit': True, 'timeout': 20000}),
             'gateio': ccxt.gateio({'enableRateLimit': True, 'timeout': 20000}),
-            'htx': ccxt.htx({'enableRateLimit': True, 'timeout': 20000})
+            'htx': ccxt.huobi({'enableRateLimit': True, 'timeout': 20000})
         }
         self.markets = {}
         self.common_symbols = set()
@@ -115,3 +115,4 @@ class ArbitrageScanner:
 
 Вывод: 🔀 {network}
 Ввод: 🔀 {network}"""
+
