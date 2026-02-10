@@ -791,4 +791,311 @@ async def help_handler(callback: types.CallbackQuery):
 
 <b>Рекомендуемые настройки:</b>
 • Объем: $100-1000
-•
+• Мин. профит: $5-10
+• Мин. доходность: 3-5%
+• Биржи: минимум 2-3
+• Сети: BEP20 (дешевые комиссии)
+
+<b>Как использовать:</b>
+1. Настройте параметры
+2. Купите подписку
+3. Нажимайте "Сканировать"
+4. Используйте найденные связки
+
+<b>Важные моменты:</b>
+• Учитывайте комиссии бирж
+• Проверяйте ликвидность
+• Выводите на проверенные сети
+
+<b>Поддержка:</b>
+Для связи: @support"""
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+    ])
+    
+    await callback.message.edit_text(help_text, reply_markup=keyboard, parse_mode='HTML')
+    await callback.answer()
+
+# ========== АДМИН ПАНЕЛЬ ==========
+@dp.callback_query(F.data == "admin")
+async def admin_panel_handler(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("🚫 Доступ запрещен", show_alert=True)
+        return
+    
+    users = get_all_users()
+    active_users = sum(1 for u in users if u[2] > 0)
+    total_scans = sum(u[3] for u in users)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin_users")],
+        [InlineKeyboardButton(text="💰 Выдать подписку", callback_data="admin_give_sub")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="start")]
+    ])
+    
+    await callback.message.edit_text(
+        f"👑 <b>Админ панель</b>\n\n"
+        f"👥 Пользователей: {len(users)}\n"
+        f"✅ Активных: {active_users}\n"
+        f"📊 Сканирований: {total_scans}",
+        reply_markup=keyboard,
+        parse_mode='HTML'
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats_handler(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    
+    users = get_all_users()
+    active_users = sum(1 for u in users if u[2] > 0)
+    total_scans = sum(u[3] for u in users)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin")]
+    ])
+    
+    text = f"📊 <b>Статистика бота</b>\n\n"
+    text += f"👥 Всего пользователей: {len(users)}\n"
+    text += f"✅ Активных подписок: {active_users}\n"
+    text += f"📈 Сканирований всего: {total_scans}\n\n"
+    text += f"<b>Топ пользователей:</b>\n"
+    
+    top_users = sorted(users, key=lambda x: x[3], reverse=True)[:5]
+    for i, (user_id, username, days, scans) in enumerate(top_users, 1):
+        text += f"{i}. @{username or 'Без имени'}: {scans} сканирований, {days} дней подписки\n"
+    
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_users")
+async def admin_users_handler(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    
+    users = get_all_users()
+    
+    buttons = []
+    for user_id, username, days, scans in users[:10]:
+        status = "✅" if days > 0 else "❌"
+        btn_text = f"{status} @{username or 'Без имени'} ({scans})"
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"user_{user_id}")])
+    
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+    await callback.message.edit_text(
+        "👥 <b>Список пользователей</b>\n✅ - активная подписка\n❌ - нет подписки\n(число) - сканирований",
+        reply_markup=keyboard,
+        parse_mode='HTML'
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("user_"))
+async def admin_user_detail_handler(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    
+    try:
+        user_id = int(callback.data.split('_')[1])
+        user = get_user(user_id)
+        
+        if not user:
+            await callback.answer("Пользователь не найден")
+            return
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ 7 дней", callback_data=f"addsub_{user_id}_7"),
+             InlineKeyboardButton(text="➕ 30 дней", callback_data=f"addsub_{user_id}_30")],
+            [InlineKeyboardButton(text="➕ 90 дней", callback_data=f"addsub_{user_id}_90")],
+            [InlineKeyboardButton(text="🔙 К списку", callback_data="admin_users")]
+        ])
+        
+        await callback.message.edit_text(
+            f"👤 <b>Пользователь:</b> @{user['username']}\n"
+            f"🆔 ID: {user_id}\n"
+            f"📅 Подписка: {user['subscription_days']} дней\n"
+            f"📊 Сканирований: {user['total_scans']}\n"
+            f"💰 Объем: ${user['min_volume']}\n"
+            f"💵 Профит: ${user['min_profit']}\n"
+            f"📈 Доход: {user['min_profit_pct']}%",
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка: {e}")
+
+@dp.callback_query(F.data.startswith("addsub_"))
+async def admin_add_subscription_handler(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    
+    try:
+        _, user_id, days = callback.data.split('_')
+        user_id = int(user_id)
+        days = int(days)
+        
+        add_subscription(user_id, days)
+        
+        await callback.answer(f"✅ Добавлено {days} дней пользователю", show_alert=True)
+        await admin_user_detail_handler(callback)
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка: {e}")
+
+@dp.callback_query(F.data == "admin_give_sub")
+async def admin_give_sub_handler(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    
+    await callback.message.edit_text(
+        "💰 <b>Выдача подписки</b>\n\n"
+        "Введите ID пользователя и количество дней через пробел:\n"
+        "Пример: <code>123456789 30</code>",
+        parse_mode='HTML'
+    )
+    await state.set_state(Form.adding_subscription)
+    await callback.answer()
+
+@dp.message(Form.adding_subscription)
+async def process_add_subscription(message: types.Message, state: FSMContext):
+    try:
+        parts = message.text.split()
+        if len(parts) != 2:
+            raise ValueError("Неверный формат")
+        
+        user_id = int(parts[0])
+        days = int(parts[1])
+        
+        if days <= 0:
+            await message.answer("❌ Количество дней должно быть больше 0")
+            return
+        
+        add_subscription(user_id, days)
+        
+        user = get_user(user_id)
+        username = user['username'] if user else "Неизвестный"
+        
+        await message.answer(f"✅ Пользователю @{username} добавлено {days} дней подписки")
+        
+        try:
+            await bot.send_message(
+                user_id,
+                f"🎉 Вам выдана подписка на {days} дней!\n"
+                f"Теперь у вас активная подписка."
+            )
+        except:
+            pass
+            
+    except ValueError as e:
+        await message.answer(f"❌ Неверный формат. Пример: 123456789 30")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+    
+    await state.clear()
+
+@dp.callback_query(F.data == "admin_broadcast")
+async def admin_broadcast_handler(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    
+    await callback.message.edit_text(
+        "📢 <b>Рассылка сообщений</b>\n\n"
+        "Введите сообщение для рассылки всем пользователям:",
+        parse_mode='HTML'
+    )
+    await state.set_state(Form.broadcast_message)
+    await callback.answer()
+
+@dp.message(Form.broadcast_message)
+async def process_broadcast(message: types.Message, state: FSMContext):
+    users = get_all_users()
+    sent = 0
+    failed = 0
+    
+    progress_msg = await message.answer(f"📤 Начинаю рассылку для {len(users)} пользователей...")
+    
+    for user_id, username, _, _ in users:
+        try:
+            await bot.send_message(user_id, message.text)
+            sent += 1
+            if sent % 10 == 0:
+                await progress_msg.edit_text(f"📤 Отправлено: {sent}/{len(users)}...")
+        except:
+            failed += 1
+        await asyncio.sleep(0.1)
+    
+    await progress_msg.edit_text(
+        f"✅ Рассылка завершена:\n"
+        f"📤 Отправлено: {sent}\n"
+        f"❌ Не отправлено: {failed}"
+    )
+    
+    await state.clear()
+
+# ========== ОБРАБОТКА ПЕРЕВОДОВ ==========
+@dp.message(F.text)
+async def handle_transaction_hash(message: types.Message):
+    # Простая проверка на хеш транзакции
+    text = message.text.strip()
+    if len(text) > 50 and all(c in 'abcdef0123456789' for c in text.lower()):
+        user_id = message.from_user.id
+        add_subscription(user_id, 30)  # 30 дней за оплату
+        
+        await message.answer(
+            f"✅ <b>Спасибо за оплату!</b>\n\n"
+            f"Ваша подписка активирована на 30 дней.\n"
+            f"Теперь вы можете использовать функцию сканирования!\n\n"
+            f"Нажмите /start для начала работы",
+            parse_mode='HTML'
+        )
+
+# ========== АВТО-СКАНИРОВАНИЕ В КАНАЛ ==========
+async def auto_scanner_channel():
+    """Автоматическое сканирование для канала"""
+    while True:
+        try:
+            await asyncio.sleep(300)  # 5 минут
+            
+            # Сканируем с базовыми настройками
+            brokers = ['Binance', 'Bybit', 'KuCoin']
+            opportunities = await scanner.find_opportunities(
+                brokers, 1000, 10, 3.0
+            )
+            
+            if opportunities:
+                # Берем лучшую связку
+                best_opp = opportunities[0]
+                if best_opp['profit_pct'] > 5.0:  # Только если доходность >5%
+                    signal = scanner.format_signal(best_opp, 'BEP20')
+                    
+                    try:
+                        await bot.send_message(CHANNEL_ID, signal, parse_mode='HTML')
+                        print(f"📤 Отправлен сигнал в канал: {best_opp['coin']}")
+                    except Exception as e:
+                        print(f"Ошибка отправки в канал: {e}")
+            
+        except Exception as e:
+            print(f"❌ Ошибка авто-сканера канала: {e}")
+            await asyncio.sleep(60)
+
+# ========== ЗАПУСК БОТА ==========
+async def main():
+    print("🚀 Запуск бота...")
+    print(f"📢 Канал: {CHANNEL_ID}")
+    print(f"👑 Админы: {ADMIN_IDS}")
+    
+    # Запускаем авто-сканер для канала
+    asyncio.create_task(auto_scanner_channel())
+    
+    print("✅ Бот запущен и готов к работе!")
+    print("📡 Сканер арбитражных возможностей активен")
+    
+    await dp.start_polling(bot)
+
+if __name__ == '__main__':
+    asyncio.run(main())
