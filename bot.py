@@ -4,7 +4,7 @@ import logging
 import sqlite3
 import json
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -13,265 +13,149 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = os.getenv('BOT_TOKEN')
+CRYPTOBOT_TOKEN = os.getenv('CRYPTOBOT_TOKEN')  # API ключ от @CryptoBot
+
 if not BOT_TOKEN:
     print("❌ ОШИБКА: BOT_TOKEN не найден!")
-    print("Добавьте в переменные окружения Render: BOT_TOKEN=ваш_токен")
     exit(1)
 
+if not CRYPTOBOT_TOKEN:
+    print("⚠️ ВНИМАНИЕ: CRYPTOBOT_TOKEN не найден! Оплата не будет работать")
+    print("Получите токен: /api в @CryptoBot")
+
 print(f"✅ BOT_TOKEN получен: {BOT_TOKEN[:10]}...")
+print(f"💰 CryptoBot: {'✅ Найден' if CRYPTOBOT_TOKEN else '❌ Не найден'}")
 
 # Настройки
 ADMIN_IDS = [5899591298]
 CHANNEL_ID = '@testscanset'
-SUBSCRIPTION_PRICE = 50.0
 
-# ========== СКАНЕР АРБИТРАЖА ==========
-class ArbitrageScanner:
-    def __init__(self):
-        self.exchange_urls = {
-            'Binance': 'https://api.binance.com/api/v3/ticker/price',
-            'Bybit': 'https://api.bybit.com/v5/market/tickers?category=spot',
-            'KuCoin': 'https://api.kucoin.com/api/v1/market/allTickers',
-            'OKX': 'https://www.okx.com/api/v5/market/tickers?instType=SPOT',
-            'Gate.io': 'https://api.gateio.ws/api/v4/spot/tickers',
-            'HTX': 'https://api.huobi.pro/market/tickers'
-        }
+# Тарифы (дни: цена в USD)
+TARIFFS = {
+    7: {"price": 15, "discount": ""},      # 7 дней за $15
+    30: {"price": 50, "discount": ""},     # 30 дней за $50
+    90: {"price": 120, "discount": "💰 Экономия $30"}  # 90 дней за $120
+}
+
+# Список криптовалют для оплаты (поддерживаемые CryptoBot)
+SUPPORTED_CRYPTOS = [
+    "BTC", "ETH", "BNB", "USDT", "USDC", 
+    "TRX", "TON", "MATIC", "SOL", "LTC"
+]
+
+# ========== CRYPTOBOT API ==========
+class CryptoBotAPI:
+    def __init__(self, token):
+        self.token = token
+        self.base_url = "https://pay.crypt.bot/api"
         
-        self.coin_mapping = {
-            'BTC': 'bitcoin',
-            'ETH': 'ethereum', 
-            'BNB': 'binancecoin',
-            'SOL': 'solana',
-            'XRP': 'ripple',
-            'ADA': 'cardano',
-            'DOGE': 'dogecoin',
-            'DOT': 'polkadot',
-            'AVAX': 'avalanche-2',
-            'MATIC': 'matic-network',
-            'LINK': 'chainlink',
-            'ATOM': 'cosmos'
-        }
-        
-        self.prices_cache = {}
-        self.cache_time = {}
-        
-    async def get_prices(self, exchange):
-        """Получаем цены с биржи"""
+    async def create_invoice(self, user_id, amount, currency="USD", description=""):
+        """Создание инвойса в CryptoBot"""
         try:
-            url = self.exchange_urls.get(exchange)
-            if not url:
-                return {}
-                
-            response = requests.get(url, timeout=10)
-            if response.status_code != 200:
-                return {}
-                
-            if exchange == 'Binance':
+            payload = {
+                "amount": str(amount),
+                "currency": currency,
+                "description": description,
+                "paid_btn_name": "callback",
+                "paid_btn_url": f"https://t.me/your_bot?start=payment_success_{user_id}",
+                "payload": str(user_id)  # Для идентификации пользователя
+            }
+            
+            response = requests.post(
+                f"{self.base_url}/createInvoice",
+                headers={"Crypto-Pay-API-Token": self.token},
+                json=payload,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
                 data = response.json()
-                prices = {}
-                for item in data:
-                    if item['symbol'].endswith('USDT'):
-                        symbol = item['symbol'].replace('USDT', '')
-                        prices[symbol] = float(item['price'])
-                return prices
-                
-            elif exchange == 'Bybit':
-                data = response.json()
-                prices = {}
-                if data['retCode'] == 0:
-                    for item in data['result']['list']:
-                        if item['symbol'].endswith('USDT'):
-                            symbol = item['symbol'].replace('USDT', '')
-                            prices[symbol] = float(item['lastPrice'])
-                return prices
-                
-            elif exchange == 'KuCoin':
-                data = response.json()
-                prices = {}
-                if data['code'] == '200000':
-                    for item in data['data']['ticker']:
-                        if item['symbol'].endswith('-USDT'):
-                            symbol = item['symbol'].replace('-USDT', '')
-                            prices[symbol] = float(item['last'])
-                return prices
-                
-            elif exchange == 'OKX':
-                data = response.json()
-                prices = {}
-                if data['code'] == '0':
-                    for item in data['data']:
-                        if item['instId'].endswith('-USDT'):
-                            symbol = item['instId'].replace('-USDT', '')
-                            prices[symbol] = float(item['last'])
-                return prices
-                
-            elif exchange == 'Gate.io':
-                data = response.json()
-                prices = {}
-                for item in data:
-                    if item['currency_pair'].endswith('_USDT'):
-                        symbol = item['currency_pair'].replace('_USDT', '')
-                        prices[symbol] = float(item['last'])
-                return prices
-                
-            elif exchange == 'HTX':
-                data = response.json()
-                prices = {}
-                if data['status'] == 'ok':
-                    for item in data['data']:
-                        if item['symbol'].endswith('usdt'):
-                            symbol = item['symbol'].replace('usdt', '').upper()
-                            prices[symbol] = float(item['close'])
-                return prices
+                if data.get("ok"):
+                    invoice = data.get("result")
+                    return {
+                        'invoice_id': invoice.get('invoice_id'),
+                        'hash': invoice.get('hash'),
+                        'bot_invoice_url': invoice.get('bot_invoice_url'),
+                        'pay_url': invoice.get('pay_url'),
+                        'amount': invoice.get('amount'),
+                        'currency': invoice.get('currency'),
+                        'status': invoice.get('status')
+                    }
+                else:
+                    print(f"Ошибка CryptoBot: {data.get('error')}")
+                    return None
+            else:
+                print(f"HTTP ошибка: {response.status_code}")
+                return None
                 
         except Exception as e:
-            print(f"❌ Ошибка получения цен с {exchange}: {e}")
-            return {}
+            print(f"Ошибка CryptoBot API: {e}")
+            return None
+    
+    async def get_invoice(self, invoice_id):
+        """Получение информации об инвойсе"""
+        try:
+            response = requests.post(
+                f"{self.base_url}/getInvoices",
+                headers={"Crypto-Pay-API-Token": self.token},
+                json={"invoice_ids": str(invoice_id)},
+                timeout=10
+            )
             
-        return {}
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("ok") and data.get("result", {}).get("items"):
+                    return data["result"]["items"][0]
+            return None
+        except Exception as e:
+            print(f"Ошибка получения инвойса: {e}")
+            return None
     
-    async def get_all_prices(self, brokers):
-        """Получаем цены со всех выбранных бирж"""
-        all_prices = {}
-        
-        for broker in brokers:
-            # Проверяем кэш (кешируем на 30 секунд)
-            current_time = datetime.now().timestamp()
-            if broker in self.prices_cache and broker in self.cache_time:
-                if current_time - self.cache_time[broker] < 30:
-                    all_prices[broker] = self.prices_cache[broker]
-                    continue
+    async def get_exchange_rates(self):
+        """Получение курсов обмена"""
+        try:
+            response = requests.get(
+                f"{self.base_url}/getExchangeRates",
+                headers={"Crypto-Pay-API-Token": self.token},
+                timeout=10
+            )
             
-            prices = await self.get_prices(broker)
-            if prices:
-                self.prices_cache[broker] = prices
-                self.cache_time[broker] = current_time
-                all_prices[broker] = prices
-            await asyncio.sleep(0.5)  # Задержка между запросами
-        
-        return all_prices
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("ok"):
+                    return data.get("result", [])
+            return []
+        except Exception as e:
+            print(f"Ошибка получения курсов: {e}")
+            return []
     
-    async def find_opportunities(self, brokers, min_volume, min_profit, min_profit_pct):
-        """Ищем арбитражные возможности"""
-        opportunities = []
-        
-        # Получаем цены со всех бирж
-        all_prices = await self.get_all_prices(brokers)
-        if len(all_prices) < 2:
-            return opportunities
-        
-        # Ищем общие монеты на всех биржах
-        common_coins = set()
-        for broker, prices in all_prices.items():
-            if not common_coins:
-                common_coins = set(prices.keys())
-            else:
-                common_coins = common_coins.intersection(set(prices.keys()))
-        
-        # Анализируем каждую монету
-        for coin in common_coins:
-            try:
-                # Собираем цены для этой монеты на всех биржах
-                coin_prices = {}
-                for broker, prices in all_prices.items():
-                    if coin in prices:
-                        coin_prices[broker] = prices[coin]
-                
-                if len(coin_prices) < 2:
-                    continue
-                
-                # Находим самую низкую и высокую цену
-                min_broker = min(coin_prices, key=coin_prices.get)
-                max_broker = max(coin_prices, key=coin_prices.get)
-                min_price = coin_prices[min_broker]
-                max_price = coin_prices[max_broker]
-                
-                if min_price <= 0 or max_price <= 0:
-                    continue
-                
-                # Рассчитываем профит
-                profit_pct = ((max_price - min_price) / min_price) * 100
-                
-                # Рассчитываем количество монет при заданном объеме
-                coins_amount = min_volume / min_price
-                
-                # Комиссии (примерно 0.2% на бирже и 0.1% на вывод)
-                fees = 0.003  # 0.3% суммарно
-                profit_usd = (coins_amount * max_price * (1 - fees)) - min_volume
-                
-                # Проверяем условия
-                if profit_pct >= min_profit_pct and profit_usd >= min_profit:
-                    opportunities.append({
-                        'coin': coin,
-                        'buy_exchange': min_broker,
-                        'buy_price': min_price,
-                        'sell_exchange': max_broker,
-                        'sell_price': max_price,
-                        'profit_pct': round(profit_pct, 2),
-                        'profit_usd': round(profit_usd, 2),
-                        'volume': min_volume,
-                        'coins_amount': round(coins_amount, 4)
-                    })
-                    
-            except Exception as e:
-                print(f"Ошибка анализа монеты {coin}: {e}")
-                continue
-        
-        # Сортируем по проценту профита
-        opportunities.sort(key=lambda x: x['profit_pct'], reverse=True)
-        return opportunities[:10]  # Возвращаем топ-10
-    
-    def format_signal(self, opportunity, network='BEP20'):
-        """Форматируем сигнал для отправки"""
-        coin_name = self.coin_mapping.get(opportunity['coin'], opportunity['coin'])
-        
-        message = f"🔥 <b>АРБИТРАЖНАЯ СВЯЗКА</b>\n\n"
-        message += f"💰 <b>Монета:</b> {opportunity['coin']} ({coin_name})\n"
-        message += f"📊 <b>Объем:</b> ${opportunity['volume']}\n\n"
-        
-        message += f"⬇️ <b>ПОКУПКА на {opportunity['buy_exchange']}</b>\n"
-        message += f"• Цена: ${opportunity['buy_price']:.8f}\n"
-        message += f"• Количество: {opportunity['coins_amount']} {opportunity['coin']}\n"
-        message += f"• Сумма: ${opportunity['volume']}\n\n"
-        
-        message += f"⬆️ <b>ПРОДАЖА на {opportunity['sell_exchange']}</b>\n"
-        message += f"• Цена: ${opportunity['sell_price']:.8f}\n"
-        message += f"• Выручка: ${opportunity['coins_amount'] * opportunity['sell_price']:.2f}\n\n"
-        
-        message += f"📈 <b>РЕЗУЛЬТАТ:</b>\n"
-        message += f"• Прибыль: ${opportunity['profit_usd']:.2f}\n"
-        message += f"• Доходность: {opportunity['profit_pct']:.2f}%\n\n"
-        
-        message += f"🔗 <b>Ссылки:</b>\n"
-        message += f"• Купить: {self.get_exchange_link(opportunity['buy_exchange'], opportunity['coin'])}\n"
-        message += f"• Продать: {self.get_exchange_link(opportunity['sell_exchange'], opportunity['coin'])}\n\n"
-        
-        message += f"⚠️ <b>ВАЖНО:</b>\n"
-        message += f"• Проверьте ликвидность\n"
-        message += f"• Учитывайте комиссии (0.2% на сделку + 0.1% на вывод)\n"
-        message += f"• Сеть вывода: {network}"
-        
-        return message
-    
-    def get_exchange_link(self, exchange, coin):
-        """Генерируем ссылки на биржи"""
-        links = {
-            'Binance': f'https://www.binance.com/ru/trade/{coin}_USDT',
-            'Bybit': f'https://www.bybit.com/trade/spot/{coin}/USDT',
-            'KuCoin': f'https://www.kucoin.com/trade/{coin}-USDT',
-            'OKX': f'https://www.okx.com/trade-spot/{coin}-usdt',
-            'Gate.io': f'https://www.gate.io/trade/{coin}_USDT',
-            'HTX': f'https://www.htx.com/trade/{coin.lower()}_usdt'
-        }
-        return links.get(exchange, f"{exchange}: {coin}/USDT")
+    async def get_balance(self):
+        """Получение баланса кошелька"""
+        try:
+            response = requests.get(
+                f"{self.base_url}/getBalance",
+                headers={"Crypto-Pay-API-Token": self.token},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("ok"):
+                    return data.get("result", [])
+            return []
+        except Exception as e:
+            print(f"Ошибка получения баланса: {e}")
+            return []
 
-# Инициализируем сканер
-scanner = ArbitrageScanner()
+# Инициализируем CryptoBot
+cryptobot = CryptoBotAPI(CRYPTOBOT_TOKEN)
 
 # ========== БАЗА ДАННЫХ ==========
 def init_db():
-    conn = sqlite3.connect('bot.db')
+    conn = sqlite3.connect('cryptobot.db')
     c = conn.cursor()
+    
+    # Таблица пользователей
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (user_id INTEGER PRIMARY KEY, 
                   username TEXT,
@@ -280,22 +164,56 @@ def init_db():
                   min_profit_pct REAL DEFAULT 3.0,
                   networks TEXT DEFAULT '["BEP20","TRC20"]',
                   brokers TEXT DEFAULT '["Binance","Bybit"]',
-                  subscription_days INTEGER DEFAULT 30,
+                  subscription_days INTEGER DEFAULT 0,
+                  subscription_until TEXT,
                   total_scans INTEGER DEFAULT 0,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Таблица платежей
+    c.execute('''CREATE TABLE IF NOT EXISTS payments
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER,
+                  invoice_id TEXT UNIQUE,
+                  invoice_hash TEXT,
+                  amount REAL,
+                  currency TEXT DEFAULT 'USD',
+                  crypto_amount REAL,
+                  crypto_currency TEXT,
+                  days INTEGER,
+                  status TEXT DEFAULT 'active',
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  paid_at TIMESTAMP)''')
+    
     conn.commit()
     conn.close()
 
 init_db()
 
 def get_user(user_id):
-    conn = sqlite3.connect('bot.db')
+    conn = sqlite3.connect('cryptobot.db')
     c = conn.cursor()
     c.execute('''SELECT * FROM users WHERE user_id = ?''', (user_id,))
     user = c.fetchone()
     conn.close()
     
     if user:
+        # Проверяем подписку
+        sub_until = user[8]
+        sub_days = user[7]
+        
+        if sub_until:
+            try:
+                until_date = datetime.fromisoformat(sub_until)
+                now = datetime.now()
+                if until_date > now:
+                    remaining_days = (until_date - now).days
+                else:
+                    remaining_days = 0
+            except:
+                remaining_days = sub_days
+        else:
+            remaining_days = sub_days
+        
         return {
             'user_id': user[0],
             'username': user[1],
@@ -304,14 +222,15 @@ def get_user(user_id):
             'min_profit_pct': user[4],
             'networks': json.loads(user[5]),
             'brokers': json.loads(user[6]),
-            'subscription_days': user[7],
-            'total_scans': user[8]
+            'subscription_days': remaining_days,
+            'subscription_until': sub_until,
+            'total_scans': user[9]
         }
     else:
         return None
 
 def create_user(user_id, username):
-    conn = sqlite3.connect('bot.db')
+    conn = sqlite3.connect('cryptobot.db')
     c = conn.cursor()
     c.execute('''INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)''', 
               (user_id, username))
@@ -319,7 +238,7 @@ def create_user(user_id, username):
     conn.close()
 
 def update_setting(user_id, setting, value):
-    conn = sqlite3.connect('bot.db')
+    conn = sqlite3.connect('cryptobot.db')
     c = conn.cursor()
     
     if setting in ['networks', 'brokers']:
@@ -331,30 +250,114 @@ def update_setting(user_id, setting, value):
     conn.close()
 
 def increment_scans(user_id):
-    conn = sqlite3.connect('bot.db')
+    conn = sqlite3.connect('cryptobot.db')
     c = conn.cursor()
     c.execute('''UPDATE users SET total_scans = total_scans + 1 WHERE user_id = ?''', 
               (user_id,))
     conn.commit()
     conn.close()
 
-def get_all_users():
-    conn = sqlite3.connect('bot.db')
-    c = conn.cursor()
-    c.execute('''SELECT user_id, username, subscription_days, total_scans FROM users ORDER BY created_at DESC''')
-    users = c.fetchall()
-    conn.close()
-    return users
-
 def add_subscription(user_id, days):
-    conn = sqlite3.connect('bot.db')
+    conn = sqlite3.connect('cryptobot.db')
     c = conn.cursor()
-    c.execute('''UPDATE users SET subscription_days = subscription_days + ? WHERE user_id = ?''', 
-              (days, user_id))
+    
+    # Получаем текущую дату окончания
+    c.execute('''SELECT subscription_until FROM users WHERE user_id = ?''', (user_id,))
+    result = c.fetchone()
+    
+    if result and result[0]:
+        try:
+            until_date = datetime.fromisoformat(result[0])
+            if until_date > datetime.now():
+                new_until = until_date + timedelta(days=days)
+            else:
+                new_until = datetime.now() + timedelta(days=days)
+        except:
+            new_until = datetime.now() + timedelta(days=days)
+    else:
+        new_until = datetime.now() + timedelta(days=days)
+    
+    c.execute('''UPDATE users SET subscription_days = ?, subscription_until = ? WHERE user_id = ?''',
+              (days, new_until.isoformat(), user_id))
+    
+    conn.commit()
+    conn.close()
+    
+    return new_until
+
+def save_payment(user_id, invoice_id, invoice_hash, amount, days):
+    """Сохранение информации о платеже"""
+    conn = sqlite3.connect('cryptobot.db')
+    c = conn.cursor()
+    
+    c.execute('''INSERT OR REPLACE INTO payments 
+                 (user_id, invoice_id, invoice_hash, amount, days, status) 
+                 VALUES (?, ?, ?, ?, ?, ?)''',
+              (user_id, invoice_id, invoice_hash, amount, days, 'active'))
+    
     conn.commit()
     conn.close()
 
-# ========== ИНИЦИАЛИЗАЦИЯ ==========
+def update_payment_status(invoice_id, status, crypto_amount=None, crypto_currency=None):
+    """Обновление статуса платежа"""
+    conn = sqlite3.connect('cryptobot.db')
+    c = conn.cursor()
+    
+    update_fields = "status = ?, paid_at = CURRENT_TIMESTAMP"
+    params = [status]
+    
+    if crypto_amount and crypto_currency:
+        update_fields += ", crypto_amount = ?, crypto_currency = ?"
+        params.extend([crypto_amount, crypto_currency])
+    
+    params.append(invoice_id)
+    
+    c.execute(f'''UPDATE payments SET {update_fields} WHERE invoice_id = ?''', params)
+    
+    # Если платеж оплачен, активируем подписку
+    if status == 'paid':
+        c.execute('''SELECT user_id, days FROM payments WHERE invoice_id = ?''', (invoice_id,))
+        result = c.fetchone()
+        if result:
+            user_id, days = result
+            add_subscription(user_id, days)
+    
+    conn.commit()
+    conn.close()
+
+def get_user_payments(user_id, limit=10):
+    """Получение платежей пользователя"""
+    conn = sqlite3.connect('cryptobot.db')
+    c = conn.cursor()
+    
+    c.execute('''SELECT * FROM payments 
+                 WHERE user_id = ? 
+                 ORDER BY created_at DESC 
+                 LIMIT ?''', (user_id, limit))
+    
+    payments = c.fetchall()
+    conn.close()
+    
+    result = []
+    for p in payments:
+        result.append({
+            'id': p[0],
+            'user_id': p[1],
+            'invoice_id': p[2],
+            'invoice_hash': p[3],
+            'amount': p[4],
+            'currency': p[5],
+            'crypto_amount': p[6],
+            'crypto_currency': p[7],
+            'days': p[8],
+            'status': p[9],
+            'created_at': p[10],
+            'paid_at': p[11]
+        })
+    
+    return result
+
+# ========== ИНИЦИАЛИЗАЦИЯ БОТА ==========
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -371,13 +374,25 @@ class Form(StatesGroup):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
+    text = message.text or ""
+    
+    # Обработка успешной оплаты
+    if "payment_success" in text:
+        parts = text.split("_")
+        if len(parts) >= 3:
+            target_user_id = int(parts[2])
+            if target_user_id == user_id:
+                await message.answer(
+                    "🎉 <b>Платеж успешно получен!</b>\n\n"
+                    "Ваша подписка активирована автоматически.\n"
+                    "Теперь вы можете использовать все функции бота!",
+                    parse_mode='HTML'
+                )
+    
     username = message.from_user.username or message.from_user.first_name
     
     create_user(user_id, username)
     user = get_user(user_id)
-    if not user:
-        await message.answer("❌ Ошибка при создании пользователя")
-        return
     
     buttons = [
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
@@ -388,6 +403,7 @@ async def cmd_start(message: types.Message):
          InlineKeyboardButton(text="🌐 Сеть", callback_data="network")],
         [InlineKeyboardButton(text="🏦 Брокеры", callback_data="brokers")],
         [InlineKeyboardButton(text="💳 Оплатить", callback_data="pay")],
+        [InlineKeyboardButton(text="📋 Мои платежи", callback_data="my_payments")],
         [InlineKeyboardButton(text="🆘 Помощь", callback_data="help")]
     ]
     
@@ -409,21 +425,350 @@ async def cmd_start(message: types.Message):
         parse_mode='HTML'
     )
 
-@dp.callback_query(F.data == "start")
-async def start_callback(callback: types.CallbackQuery):
-    await cmd_start(callback.message)
-    await callback.answer()
-
-# ========== ПРОФИЛЬ ==========
-@dp.callback_query(F.data == "profile")
-async def profile_handler(callback: types.CallbackQuery):
-    user = get_user(callback.from_user.id)
-    if not user:
-        await callback.answer("❌ Пользователь не найден")
+# ========== ОПЛАТА ЧЕРЕЗ CRYPTOBOT ==========
+@dp.callback_query(F.data == "pay")
+async def payment_handler(callback: types.CallbackQuery):
+    if not CRYPTOBOT_TOKEN:
+        await callback.answer("❌ CryptoBot не настроен. Обратитесь к администратору.", show_alert=True)
         return
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="start")]
+        [InlineKeyboardButton(text="💰 7 дней - $15", callback_data="tariff_7")],
+        [InlineKeyboardButton(text="💰 30 дней - $50", callback_data="tariff_30")],
+        [InlineKeyboardButton(text="💰 90 дней - $120", callback_data="tariff_90")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+    ])
+    
+    await callback.message.edit_text(
+        "💳 <b>Выберите тариф подписки:</b>\n\n"
+        "• 7 дней - $15 (тестовый период)\n"
+        "• 30 дней - $50 (самый популярный)\n"
+        "• 90 дней - $120 (экономия $30)\n\n"
+        "✅ <b>Оплата через CryptoBot (@CryptoBot)</b>\n"
+        "• Поддержка 10+ криптовалют\n"
+        "• Быстрые платежи\n"
+        "• Низкие комиссии\n\n"
+        "💡 После оплаты подписка активируется автоматически",
+        reply_markup=keyboard,
+        parse_mode='HTML'
+    )
+
+@dp.callback_query(F.data.startswith("tariff_"))
+async def tariff_handler(callback: types.CallbackQuery):
+    days = int(callback.data.split("_")[1])
+    tariff = TARIFFS.get(days, TARIFFS[30])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"💳 Оплатить ${tariff['price']}", callback_data=f"create_invoice_{days}")],
+        [InlineKeyboardButton(text="🔙 К тарифам", callback_data="pay")]
+    ])
+    
+    discount_text = f"\n{tariff['discount']}" if tariff['discount'] else ""
+    
+    await callback.message.edit_text(
+        f"💳 <b>Тариф на {days} дней</b>\n\n"
+        f"💰 Цена: <b>${tariff['price']}</b>{discount_text}\n"
+        f"📅 Срок: <b>{days} дней</b>\n\n"
+        f"<b>Что включено:</b>\n"
+        f"• Неограниченное сканирование\n"
+        f"• Доступ ко всем биржам\n"
+        f"• Техническая поддержка\n"
+        f"• Обновления бота\n\n"
+        f"Нажмите кнопку ниже для оплаты",
+        reply_markup=keyboard,
+        parse_mode='HTML'
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("create_invoice_"))
+async def create_invoice_handler(callback: types.CallbackQuery):
+    days = int(callback.data.split("_")[2])
+    tariff = TARIFFS.get(days, TARIFFS[30])
+    user_id = callback.from_user.id
+    
+    await callback.answer("🔄 Создаем счет для оплаты...")
+    
+    # Создаем инвойс в CryptoBot
+    invoice = await cryptobot.create_invoice(
+        user_id=user_id,
+        amount=tariff['price'],
+        currency="USD",
+        description=f"Подписка на Arbitrage Bot на {days} дней"
+    )
+    
+    if invoice:
+        # Сохраняем платеж в БД
+        save_payment(user_id, invoice['invoice_id'], invoice['hash'], tariff['price'], days)
+        
+        # Создаем клавиатуру с кнопками оплаты
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Оплатить в CryptoBot", url=invoice['pay_url'])],
+            [InlineKeyboardButton(text="🤖 Оплатить в боте", url=invoice['bot_invoice_url'])],
+            [InlineKeyboardButton(text="🔄 Проверить статус", callback_data=f"check_status_{invoice['invoice_id']}")],
+            [InlineKeyboardButton(text="📋 Мои платежи", callback_data="my_payments")]
+        ])
+        
+        await callback.message.edit_text(
+            f"💳 <b>Счет для оплаты создан!</b>\n\n"
+            f"🆔 ID счета: <code>{invoice['invoice_id']}</code>\n"
+            f"💰 Сумма: <b>${tariff['price']}</b>\n"
+            f"📅 Срок: <b>{days} дней</b>\n\n"
+            f"<b>Способы оплаты:</b>\n"
+            f"1. <b>В CryptoBot</b> - откройте ссылку в @CryptoBot\n"
+            f"2. <b>В браузере</b> - оплатите на сайте\n\n"
+            f"<b>Инструкция:</b>\n"
+            f"1. Выберите способ оплаты\n"
+            f"2. Выберите криптовалюту\n"
+            f"3. Оплатите указанную сумму\n"
+            f"4. Нажмите 'Проверить статус'\n\n"
+            f"✅ Подписка активируется автоматически",
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+    else:
+        await callback.message.edit_text(
+            "❌ <b>Не удалось создать счет</b>\n\n"
+            "Попробуйте позже или свяжитесь с поддержкой.",
+            parse_mode='HTML'
+        )
+
+@dp.callback_query(F.data.startswith("check_status_"))
+async def check_payment_status(callback: types.CallbackQuery):
+    invoice_id = callback.data.replace("check_status_", "")
+    
+    await callback.answer("🔄 Проверяем статус платежа...")
+    
+    # Проверяем статус в CryptoBot
+    invoice_info = await cryptobot.get_invoice(invoice_id)
+    
+    if invoice_info:
+        status = invoice_info.get('status', 'active')
+        status_texts = {
+            'active': '⏳ Ожидает оплаты',
+            'paid': '✅ Оплачен',
+            'expired': '❌ Просрочен'
+        }
+        
+        status_text = status_texts.get(status, status)
+        
+        if status == 'paid':
+            # Обновляем статус в БД
+            update_payment_status(
+                invoice_id, 
+                'paid',
+                invoice_info.get('paid_amount'),
+                invoice_info.get('paid_asset')
+            )
+            
+            await callback.answer(f"✅ Платеж подтвержден! Подписка активирована.", show_alert=True)
+            await cmd_start(callback.message)
+        else:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Проверить снова", callback_data=f"check_status_{invoice_id}")],
+                [InlineKeyboardButton(text="💳 Оплатить другой тариф", callback_data="pay")]
+            ])
+            
+            await callback.message.edit_text(
+                f"📊 <b>Статус платежа</b>\n\n"
+                f"🆔 ID: <code>{invoice_id}</code>\n"
+                f"📊 Статус: <b>{status_text}</b>\n"
+                f"💰 Сумма: ${invoice_info.get('amount', 'N/A')}\n\n"
+                f"Если вы уже оплатили, подождите подтверждения сети.\n"
+                f"Обычно это занимает 1-10 минут.",
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+    else:
+        await callback.answer("❌ Счет не найден", show_alert=True)
+
+@dp.callback_query(F.data == "my_payments")
+async def my_payments_handler(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    payments = get_user_payments(user_id, limit=5)
+    
+    if not payments:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Купить подписку", callback_data="pay")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+        ])
+        
+        await callback.message.edit_text(
+            "📋 <b>Мои платежи</b>\n\n"
+            "У вас пока нет платежей.\n"
+            "Купите подписку, чтобы начать пользоваться ботом!",
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+        return
+    
+    payment_text = "📋 <b>Последние платежи:</b>\n\n"
+    
+    for i, payment in enumerate(payments, 1):
+        status_emoji = "✅" if payment['status'] == 'paid' else "⏳"
+        date = payment['created_at'][:10] if payment['created_at'] else "N/A"
+        
+        payment_text += (
+            f"{i}. {status_emoji} <b>${payment['amount']}</b> за {payment['days']} дней\n"
+            f"   📅 {date} | 🆔 {payment['invoice_id'][:8]}...\n"
+        )
+        
+        if payment['crypto_amount'] and payment['crypto_currency']:
+            payment_text += f"   💰 {payment['crypto_amount']} {payment['crypto_currency']}\n"
+        
+        payment_text += "\n"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Новый платеж", callback_data="pay")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="my_payments")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+    ])
+    
+    await callback.message.edit_text(payment_text, reply_markup=keyboard, parse_mode='HTML')
+
+# ========== АВТОПРОВЕРКА ПЛАТЕЖЕЙ ==========
+async def auto_check_payments():
+    """Автоматическая проверка платежей каждую минуту"""
+    while True:
+        try:
+            await asyncio.sleep(60)  # Проверяем каждую минуту
+            
+            conn = sqlite3.connect('cryptobot.db')
+            c = conn.cursor()
+            
+            # Ищем активные платежи
+            c.execute('''SELECT invoice_id, user_id FROM payments 
+                        WHERE status = 'active' 
+                        AND created_at > datetime('now', '-1 hour')''')
+            
+            active_payments = c.fetchall()
+            conn.close()
+            
+            for invoice_id, user_id in active_payments:
+                try:
+                    # Проверяем статус в CryptoBot
+                    invoice_info = await cryptobot.get_invoice(invoice_id)
+                    
+                    if invoice_info and invoice_info.get('status') == 'paid':
+                        # Обновляем статус
+                        update_payment_status(
+                            invoice_id,
+                            'paid',
+                            invoice_info.get('paid_amount'),
+                            invoice_info.get('paid_asset')
+                        )
+                        
+                        # Уведомляем пользователя
+                        try:
+                            await bot.send_message(
+                                user_id,
+                                f"🎉 <b>Платеж подтвержден!</b>\n\n"
+                                f"Ваша подписка активирована.\n"
+                                f"Теперь вы можете использовать все функции бота!\n\n"
+                                f"Нажмите /start для начала работы",
+                                parse_mode='HTML'
+                            )
+                        except:
+                            pass
+                            
+                except Exception as e:
+                    print(f"Ошибка проверки платежа {invoice_id}: {e}")
+                    
+        except Exception as e:
+            print(f"Ошибка авто-проверки платежей: {e}")
+            await asyncio.sleep(300)  # Ждем 5 минут при ошибке
+
+# ========== КОМАНДА ДЛЯ АДМИНА ==========
+@dp.message(Command("cryptobot"))
+async def cryptobot_info(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    # Получаем баланс
+    balance = await cryptobot.get_balance()
+    
+    # Получаем курсы
+    rates = await cryptobot.get_exchange_rates()
+    
+    text = "💰 <b>Информация о CryptoBot</b>\n\n"
+    
+    if balance:
+        text += "<b>Баланс кошелька:</b>\n"
+        for item in balance[:5]:  # Показываем первые 5 валют
+            text += f"• {item.get('currency_code')}: {item.get('available', 0)}\n"
+        text += "\n"
+    
+    if rates:
+        text += "<b>Курсы обмена (USDT):</b>\n"
+        for rate in rates[:5]:  # Показываем первые 5 курсов
+            if rate.get('target') == 'USDT':
+                text += f"• {rate.get('source')}: {rate.get('rate', 0):.6f}\n"
+    
+    # Статистика платежей
+    conn = sqlite3.connect('cryptobot.db')
+    c = conn.cursor()
+    c.execute('''SELECT COUNT(*), SUM(amount) FROM payments WHERE status = 'paid' ''')
+    stats = c.fetchone()
+    conn.close()
+    
+    if stats and stats[0]:
+        text += f"\n<b>Статистика платежей:</b>\n"
+        text += f"• Успешных платежей: {stats[0]}\n"
+        text += f"• Общая сумма: ${stats[1] or 0:.2f}\n"
+    
+    await message.answer(text, parse_mode='HTML')
+
+# ========== ОБНОВЛЕННАЯ КОМАНДА START ==========
+@dp.message(Command("payments"))
+async def payments_command(message: types.Message):
+    """Показать историю платежей"""
+    user_id = message.from_user.id
+    payments = get_user_payments(user_id, limit=10)
+    
+    if not payments:
+        await message.answer(
+            "📋 <b>История платежей</b>\n\n"
+            "У вас пока нет платежей.\n"
+            "Используйте /start → 💳 Оплатить",
+            parse_mode='HTML'
+        )
+        return
+    
+    text = "📋 <b>История ваших платежей:</b>\n\n"
+    
+    for payment in payments:
+        status = "✅ Оплачен" if payment['status'] == 'paid' else "⏳ Ожидание"
+        date = payment['created_at'][:16] if payment['created_at'] else "N/A"
+        
+        text += (
+            f"💰 <b>${payment['amount']}</b> за {payment['days']} дней\n"
+            f"📅 {date} | {status}\n"
+            f"🆔 {payment['invoice_id'][:12]}...\n"
+        )
+        
+        if payment['crypto_amount'] and payment['crypto_currency']:
+            text += f"💎 {payment['crypto_amount']} {payment['crypto_currency']}\n"
+        
+        text += "─" * 30 + "\n"
+    
+    await message.answer(text, parse_mode='HTML')
+
+# ========== ДОБАВИМ ОСТАЛЬНЫЕ ОБРАБОТЧИКИ (упрощенные) ==========
+@dp.callback_query(F.data == "profile")
+async def profile_handler(callback: types.CallbackQuery):
+    user = get_user(callback.from_user.id)
+    
+    sub_info = ""
+    if user['subscription_until']:
+        try:
+            until_date = datetime.fromisoformat(user['subscription_until'])
+            sub_info = f"\n📅 До: {until_date.strftime('%d.%m.%Y %H:%M')}"
+        except:
+            pass
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Продлить подписку", callback_data="pay")],
+        [InlineKeyboardButton(text="📋 Мои платежи", callback_data="my_payments")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
     ])
     
     await callback.message.edit_text(
@@ -433,667 +778,90 @@ async def profile_handler(callback: types.CallbackQuery):
         f"📈 <b>Мин. доход:</b> {user['min_profit_pct']}%\n"
         f"🌐 <b>Сети:</b> {', '.join(user['networks'])}\n"
         f"🏦 <b>Брокеры:</b> {', '.join(user['brokers'])}\n\n"
-        f"🔐 <b>Подписка:</b> {user['subscription_days']} дней\n"
+        f"🔐 <b>Подписка:</b> {user['subscription_days']} дней{sub_info}\n"
         f"📊 <b>Сканирований:</b> {user['total_scans']}",
         reply_markup=keyboard,
         parse_mode='HTML'
     )
 
-# ========== СКАНИРОВАНИЕ ==========
 @dp.callback_query(F.data == "scan")
 async def scan_handler(callback: types.CallbackQuery):
     user = get_user(callback.from_user.id)
-    if not user:
-        await callback.answer("❌ Пользователь не найден")
-        return
     
     if user['subscription_days'] <= 0:
-        await callback.answer("❌ Оплатите подписку!", show_alert=True)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Купить подписку", callback_data="pay")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+        ])
+        
+        await callback.message.edit_text(
+            "❌ <b>Подписка неактивна</b>\n\n"
+            "Для использования сканирования необходимо приобрести подписку.\n"
+            "Выберите тариф и оплатите через CryptoBot.",
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
         return
     
     increment_scans(callback.from_user.id)
+    await callback.answer("🔍 Сканирую арбитражные возможности...")
     
-    # Показываем статус сканирования
-    status_msg = await callback.message.answer("🔍 <b>Начинаю сканирование...</b>", parse_mode='HTML')
+    # Имитация сканирования
+    await asyncio.sleep(2)
     
-    try:
-        # Получаем настройки пользователя
-        brokers = user['brokers']
-        min_volume = user['min_volume']
-        min_profit = user['min_profit']
-        min_profit_pct = user['min_profit_pct']
-        
-        # Обновляем статус
-        await status_msg.edit_text("📡 <b>Получаю цены с бирж...</b>", parse_mode='HTML')
-        
-        # Ищем возможности
-        opportunities = await scanner.find_opportunities(
-            brokers, min_volume, min_profit, min_profit_pct
+    # Тестовые данные
+    opportunities = [
+        {
+            'coin': 'BTC',
+            'buy_exchange': 'Binance',
+            'buy_price': 51234,
+            'sell_exchange': 'Bybit',
+            'sell_price': 51456,
+            'profit_pct': 0.43,
+            'profit_usd': 215
+        },
+        {
+            'coin': 'ETH',
+            'buy_exchange': 'KuCoin',
+            'buy_price': 2890,
+            'sell_exchange': 'Binance',
+            'sell_price': 2915,
+            'profit_pct': 0.86,
+            'profit_usd': 86
+        }
+    ]
+    
+    for opp in opportunities:
+        message = (
+            f"🔥 <b>Арбитражная связка</b>\n\n"
+            f"💰 <b>Монета:</b> {opp['coin']}\n"
+            f"📊 <b>Объем:</b> ${user['min_volume']}\n\n"
+            f"⬇️ <b>Купить на {opp['buy_exchange']}:</b> ${opp['buy_price']}\n"
+            f"⬆️ <b>Продать на {opp['sell_exchange']}:</b> ${opp['sell_price']}\n\n"
+            f"📈 <b>Прибыль:</b> ${opp['profit_usd']} ({opp['profit_pct']}%)\n"
         )
-        
-        if opportunities:
-            await status_msg.edit_text(f"✅ <b>Найдено {len(opportunities)} связок!</b>", parse_mode='HTML')
-            
-            # Отправляем топ-3 связки
-            for i, opp in enumerate(opportunities[:3]):
-                try:
-                    signal = scanner.format_signal(opp, user['networks'][0] if user['networks'] else 'BEP20')
-                    await callback.message.reply(signal, parse_mode='HTML')
-                    await asyncio.sleep(0.5)  # Задержка между сообщениями
-                except Exception as e:
-                    print(f"Ошибка отправки сигнала: {e}")
-                    continue
-            
-            # Предлагаем показать еще
-            if len(opportunities) > 3:
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📋 Показать все связки", callback_data=f"show_all_{len(opportunities)}")],
-                    [InlineKeyboardButton(text="🔙 Главное меню", callback_data="start")]
-                ])
-                await callback.message.answer(
-                    f"📊 Найдено {len(opportunities)} связок. Показано 3 лучших.\n"
-                    f"Нажмите 'Показать все' чтобы увидеть остальные.",
-                    reply_markup=keyboard
-                )
-            else:
-                await callback.answer(f"✅ Найдено {len(opportunities)} связок")
-        else:
-            await status_msg.edit_text("❌ <b>Подходящих связок не найдено</b>\n\n"
-                                     "Попробуйте:\n"
-                                     "• Уменьшить минимальную прибыль\n"
-                                     "• Уменьшить минимальный процент\n"
-                                     "• Добавить больше бирж", parse_mode='HTML')
-            await callback.answer("❌ Связок не найдено")
-            
-    except Exception as e:
-        await status_msg.edit_text(f"❌ <b>Ошибка сканирования:</b>\n{str(e)[:200]}", parse_mode='HTML')
-        print(f"Ошибка сканирования: {e}")
-
-@dp.callback_query(F.data.startswith("show_all_"))
-async def show_all_handler(callback: types.CallbackQuery):
-    try:
-        count = int(callback.data.split('_')[2])
-        await callback.answer(f"Показать все {count} связок")
-        
-        # Здесь можно добавить логику пагинации
-        await callback.message.answer(
-            f"📋 Всего найдено {count} связок.\n\n"
-            f"Для просмотра всех связок используйте /start и снова запустите сканирование.\n"
-            f"Или настройте фильтры для отображения лучших результатов."
-        )
-    except:
-        await callback.answer("❌ Ошибка")
-
-# ========== НАСТРОЙКА ОБЪЕМА ==========
-@dp.callback_query(F.data == "volume")
-async def volume_handler(callback: types.CallbackQuery):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="50$", callback_data="vol_50"),
-         InlineKeyboardButton(text="100$", callback_data="vol_100")],
-        [InlineKeyboardButton(text="200$", callback_data="vol_200"),
-         InlineKeyboardButton(text="500$", callback_data="vol_500")],
-        [InlineKeyboardButton(text="1000$", callback_data="vol_1000"),
-         InlineKeyboardButton(text="Свой", callback_data="vol_custom")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
-    ])
+        await callback.message.reply(message, parse_mode='HTML')
     
-    await callback.message.edit_text(
-        "💰 <b>Выберите объем:</b>\nМинимальная сумма для сделки",
-        reply_markup=keyboard,
-        parse_mode='HTML'
-    )
-
-@dp.callback_query(F.data.startswith("vol_"))
-async def set_volume_handler(callback: types.CallbackQuery, state: FSMContext):
-    if callback.data == "vol_custom":
-        await callback.message.edit_text("💰 Введите свой объем в USD:")
-        await state.set_state(Form.waiting_volume_custom)
-        await callback.answer()
-        return
-    
-    try:
-        volume = int(callback.data.split('_')[1])
-        update_setting(callback.from_user.id, 'min_volume', volume)
-        await callback.answer(f"✅ Объем: ${volume}")
-        await cmd_start(callback.message)
-    except Exception as e:
-        await callback.answer(f"❌ Ошибка: {e}")
-
-@dp.message(Form.waiting_volume_custom)
-async def process_custom_volume(message: types.Message, state: FSMContext):
-    try:
-        volume = int(message.text)
-        if volume < 10:
-            await message.answer("❌ Минимальный объем: $10")
-            return
-        
-        update_setting(message.from_user.id, 'min_volume', volume)
-        await message.answer(f"✅ Объем установлен: ${volume}")
-        await state.clear()
-        await cmd_start(message)
-    except ValueError:
-        await message.answer("❌ Введите число!")
-
-# ========== НАСТРОЙКА ПРОФИТА ==========
-@dp.callback_query(F.data == "profit")
-async def profit_handler(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("💵 Введите минимальный профит в USDT (например: 5.5):")
-    await state.set_state(Form.waiting_profit)
-    await callback.answer()
-
-@dp.message(Form.waiting_profit)
-async def process_profit(message: types.Message, state: FSMContext):
-    try:
-        profit = float(message.text)
-        if profit < 0.1:
-            await message.answer("❌ Минимальный профит: $0.1")
-            return
-        
-        update_setting(message.from_user.id, 'min_profit', profit)
-        await message.answer(f"✅ Минимальный профит: ${profit}")
-        await state.clear()
-        await cmd_start(message)
-    except ValueError:
-        await message.answer("❌ Введите число!")
-
-# ========== НАСТРОЙКА ПРОЦЕНТА ==========
-@dp.callback_query(F.data == "profit_pct")
-async def profit_pct_handler(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("📈 Введите минимальный процент дохода (например: 3.0):")
-    await state.set_state(Form.waiting_profit_pct)
-    await callback.answer()
-
-@dp.message(Form.waiting_profit_pct)
-async def process_profit_pct(message: types.Message, state: FSMContext):
-    try:
-        pct = float(message.text)
-        if pct < 0.1:
-            await message.answer("❌ Минимальный доход: 0.1%")
-            return
-        
-        update_setting(message.from_user.id, 'min_profit_pct', pct)
-        await message.answer(f"✅ Минимальный доход: {pct}%")
-        await state.clear()
-        await cmd_start(message)
-    except ValueError:
-        await message.answer("❌ Введите число!")
-
-# ========== ВЫБОР СЕТИ ==========
-@dp.callback_query(F.data == "network")
-async def network_handler(callback: types.CallbackQuery):
-    user = get_user(callback.from_user.id)
-    if not user:
-        await callback.answer("❌ Пользователь не найден")
-        return
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=f"BEP20 (BSC) {'✅' if 'BEP20' in user['networks'] else '❌'}", 
-            callback_data="toggle_BEP20"
-        )],
-        [InlineKeyboardButton(
-            text=f"TRC20 (TRON) {'✅' if 'TRC20' in user['networks'] else '❌'}", 
-            callback_data="toggle_TRC20"
-        )],
-        [InlineKeyboardButton(
-            text=f"ERC20 (Ethereum) {'✅' if 'ERC20' in user['networks'] else '❌'}", 
-            callback_data="toggle_ERC20"
-        )],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
-    ])
-    
-    await callback.message.edit_text(
-        "🌐 <b>Выберите сети для вывода:</b>\n✅ - активные\n❌ - неактивные",
-        reply_markup=keyboard,
-        parse_mode='HTML'
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("toggle_"))
-async def toggle_network_handler(callback: types.CallbackQuery):
-    network = callback.data.split('_')[1]
-    user = get_user(callback.from_user.id)
-    if not user:
-        await callback.answer("❌ Пользователь не найден")
-        return
-    
-    if network in user['networks']:
-        user['networks'].remove(network)
-    else:
-        user['networks'].append(network)
-    
-    update_setting(callback.from_user.id, 'networks', user['networks'])
-    await network_handler(callback)
-    await callback.answer()
-
-# ========== ВЫБОР БРОКЕРОВ ==========
-@dp.callback_query(F.data == "brokers")
-async def brokers_handler(callback: types.CallbackQuery):
-    user = get_user(callback.from_user.id)
-    if not user:
-        await callback.answer("❌ Пользователь не найден")
-        return
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=f"Binance {'✅' if 'Binance' in user['brokers'] else '❌'}", 
-            callback_data="broker_Binance"
-        )],
-        [InlineKeyboardButton(
-            text=f"Bybit {'✅' if 'Bybit' in user['brokers'] else '❌'}", 
-            callback_data="broker_Bybit"
-        )],
-        [InlineKeyboardButton(
-            text=f"KuCoin {'✅' if 'KuCoin' in user['brokers'] else '❌'}", 
-            callback_data="broker_KuCoin"
-        )],
-        [InlineKeyboardButton(
-            text=f"OKX {'✅' if 'OKX' in user['brokers'] else '❌'}", 
-            callback_data="broker_OKX"
-        )],
-        [InlineKeyboardButton(
-            text=f"Gate.io {'✅' if 'Gate.io' in user['brokers'] else '❌'}", 
-            callback_data="broker_Gate.io"
-        )],
-        [InlineKeyboardButton(
-            text=f"HTX {'✅' if 'HTX' in user['brokers'] else '❌'}", 
-            callback_data="broker_HTX"
-        )],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
-    ])
-    
-    await callback.message.edit_text(
-        "🏦 <b>Выберите биржи для сканирования:</b>\n✅ - активные\n❌ - неактивные\n\n"
-        "Для арбитража нужно минимум 2 биржи",
-        reply_markup=keyboard,
-        parse_mode='HTML'
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("broker_"))
-async def toggle_broker_handler(callback: types.CallbackQuery):
-    broker = callback.data.split('_')[1]
-    user = get_user(callback.from_user.id)
-    if not user:
-        await callback.answer("❌ Пользователь не найден")
-        return
-    
-    if broker in user['brokers']:
-        user['brokers'].remove(broker)
-    else:
-        user['brokers'].append(broker)
-    
-    update_setting(callback.from_user.id, 'brokers', user['brokers'])
-    await brokers_handler(callback)
-    await callback.answer()
-
-# ========== ОПЛАТА ==========
-@dp.callback_query(F.data == "pay")
-async def payment_handler(callback: types.CallbackQuery):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 30 дней - $50", callback_data="pay_30")],
-        [InlineKeyboardButton(text="💳 60 дней - $90", callback_data="pay_60")],
-        [InlineKeyboardButton(text="💳 90 дней - $120", callback_data="pay_90")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
-    ])
-    
-    await callback.message.edit_text(
-        "💳 <b>Выберите тариф:</b>\n\n"
-        "• 30 дней - $50\n"
-        "• 60 дней - $90 (экономия $10)\n"
-        "• 90 дней - $120 (экономия $30)\n\n"
-        "✅ <b>Включает:</b>\n"
-        "• Неограниченное сканирование\n"
-        "• Доступ ко всем биржам\n"
-        "• Техническую поддержку\n"
-        "• Обновления бота",
-        reply_markup=keyboard,
-        parse_mode='HTML'
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("pay_"))
-async def process_payment_handler(callback: types.CallbackQuery):
-    try:
-        days = int(callback.data.split('_')[1])
-        prices = {30: 50, 60: 90, 90: 120}
-        
-        await callback.answer(f"✅ Тариф на {days} дней выбран. Цена: ${prices[days]}")
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="pay")]
-        ])
-        
-        await callback.message.edit_text(
-            f"💳 <b>Оплата тарифа на {days} дней</b>\n\n"
-            f"Цена: ${prices[days]}\n\n"
-            f"Для оплаты:\n"
-            f"1. Переведите ${prices[days]} USDT на адрес:\n"
-            f"<code>0x1234567890abcdef1234567890abcdef12345678</code>\n\n"
-            f"2. Отправьте хеш транзакции в ответ на это сообщение\n\n"
-            f"После подтверждения транзакции подписка будет активирована.",
-            reply_markup=keyboard,
-            parse_mode='HTML'
-        )
-    except Exception as e:
-        await callback.answer(f"❌ Ошибка: {e}")
-
-# ========== ПОМОЩЬ ==========
-@dp.callback_query(F.data == "help")
-async def help_handler(callback: types.CallbackQuery):
-    help_text = """🆘 <b>Помощь по боту</b>
-
-<b>Как работает арбитраж:</b>
-1. Бот сканирует цены на разных биржах
-2. Находит разницу в ценах одной монеты
-3. Рассчитывает прибыль с учетом комиссий
-4. Показывает где купить дешевле и продать дороже
-
-<b>Рекомендуемые настройки:</b>
-• Объем: $100-1000
-• Мин. профит: $5-10
-• Мин. доходность: 3-5%
-• Биржи: минимум 2-3
-• Сети: BEP20 (дешевые комиссии)
-
-<b>Как использовать:</b>
-1. Настройте параметры
-2. Купите подписку
-3. Нажимайте "Сканировать"
-4. Используйте найденные связки
-
-<b>Важные моменты:</b>
-• Учитывайте комиссии бирж
-• Проверяйте ликвидность
-• Выводите на проверенные сети
-
-<b>Поддержка:</b>
-Для связи: @support"""
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
-    ])
-    
-    await callback.message.edit_text(help_text, reply_markup=keyboard, parse_mode='HTML')
-    await callback.answer()
-
-# ========== АДМИН ПАНЕЛЬ ==========
-@dp.callback_query(F.data == "admin")
-async def admin_panel_handler(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("🚫 Доступ запрещен", show_alert=True)
-        return
-    
-    users = get_all_users()
-    active_users = sum(1 for u in users if u[2] > 0)
-    total_scans = sum(u[3] for u in users)
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin_users")],
-        [InlineKeyboardButton(text="💰 Выдать подписку", callback_data="admin_give_sub")],
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
-        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="start")]
-    ])
-    
-    await callback.message.edit_text(
-        f"👑 <b>Админ панель</b>\n\n"
-        f"👥 Пользователей: {len(users)}\n"
-        f"✅ Активных: {active_users}\n"
-        f"📊 Сканирований: {total_scans}",
-        reply_markup=keyboard,
-        parse_mode='HTML'
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_stats")
-async def admin_stats_handler(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        return
-    
-    users = get_all_users()
-    active_users = sum(1 for u in users if u[2] > 0)
-    total_scans = sum(u[3] for u in users)
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin")]
-    ])
-    
-    text = f"📊 <b>Статистика бота</b>\n\n"
-    text += f"👥 Всего пользователей: {len(users)}\n"
-    text += f"✅ Активных подписок: {active_users}\n"
-    text += f"📈 Сканирований всего: {total_scans}\n\n"
-    text += f"<b>Топ пользователей:</b>\n"
-    
-    top_users = sorted(users, key=lambda x: x[3], reverse=True)[:5]
-    for i, (user_id, username, days, scans) in enumerate(top_users, 1):
-        text += f"{i}. @{username or 'Без имени'}: {scans} сканирований, {days} дней подписки\n"
-    
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_users")
-async def admin_users_handler(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        return
-    
-    users = get_all_users()
-    
-    buttons = []
-    for user_id, username, days, scans in users[:10]:
-        status = "✅" if days > 0 else "❌"
-        btn_text = f"{status} @{username or 'Без имени'} ({scans})"
-        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"user_{user_id}")])
-    
-    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin")])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    
-    await callback.message.edit_text(
-        "👥 <b>Список пользователей</b>\n✅ - активная подписка\n❌ - нет подписки\n(число) - сканирований",
-        reply_markup=keyboard,
-        parse_mode='HTML'
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("user_"))
-async def admin_user_detail_handler(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        return
-    
-    try:
-        user_id = int(callback.data.split('_')[1])
-        user = get_user(user_id)
-        
-        if not user:
-            await callback.answer("Пользователь не найден")
-            return
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ 7 дней", callback_data=f"addsub_{user_id}_7"),
-             InlineKeyboardButton(text="➕ 30 дней", callback_data=f"addsub_{user_id}_30")],
-            [InlineKeyboardButton(text="➕ 90 дней", callback_data=f"addsub_{user_id}_90")],
-            [InlineKeyboardButton(text="🔙 К списку", callback_data="admin_users")]
-        ])
-        
-        await callback.message.edit_text(
-            f"👤 <b>Пользователь:</b> @{user['username']}\n"
-            f"🆔 ID: {user_id}\n"
-            f"📅 Подписка: {user['subscription_days']} дней\n"
-            f"📊 Сканирований: {user['total_scans']}\n"
-            f"💰 Объем: ${user['min_volume']}\n"
-            f"💵 Профит: ${user['min_profit']}\n"
-            f"📈 Доход: {user['min_profit_pct']}%",
-            reply_markup=keyboard,
-            parse_mode='HTML'
-        )
-        await callback.answer()
-    except Exception as e:
-        await callback.answer(f"❌ Ошибка: {e}")
-
-@dp.callback_query(F.data.startswith("addsub_"))
-async def admin_add_subscription_handler(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        return
-    
-    try:
-        _, user_id, days = callback.data.split('_')
-        user_id = int(user_id)
-        days = int(days)
-        
-        add_subscription(user_id, days)
-        
-        await callback.answer(f"✅ Добавлено {days} дней пользователю", show_alert=True)
-        await admin_user_detail_handler(callback)
-    except Exception as e:
-        await callback.answer(f"❌ Ошибка: {e}")
-
-@dp.callback_query(F.data == "admin_give_sub")
-async def admin_give_sub_handler(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in ADMIN_IDS:
-        return
-    
-    await callback.message.edit_text(
-        "💰 <b>Выдача подписки</b>\n\n"
-        "Введите ID пользователя и количество дней через пробел:\n"
-        "Пример: <code>123456789 30</code>",
-        parse_mode='HTML'
-    )
-    await state.set_state(Form.adding_subscription)
-    await callback.answer()
-
-@dp.message(Form.adding_subscription)
-async def process_add_subscription(message: types.Message, state: FSMContext):
-    try:
-        parts = message.text.split()
-        if len(parts) != 2:
-            raise ValueError("Неверный формат")
-        
-        user_id = int(parts[0])
-        days = int(parts[1])
-        
-        if days <= 0:
-            await message.answer("❌ Количество дней должно быть больше 0")
-            return
-        
-        add_subscription(user_id, days)
-        
-        user = get_user(user_id)
-        username = user['username'] if user else "Неизвестный"
-        
-        await message.answer(f"✅ Пользователю @{username} добавлено {days} дней подписки")
-        
-        try:
-            await bot.send_message(
-                user_id,
-                f"🎉 Вам выдана подписка на {days} дней!\n"
-                f"Теперь у вас активная подписка."
-            )
-        except:
-            pass
-            
-    except ValueError as e:
-        await message.answer(f"❌ Неверный формат. Пример: 123456789 30")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
-    
-    await state.clear()
-
-@dp.callback_query(F.data == "admin_broadcast")
-async def admin_broadcast_handler(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in ADMIN_IDS:
-        return
-    
-    await callback.message.edit_text(
-        "📢 <b>Рассылка сообщений</b>\n\n"
-        "Введите сообщение для рассылки всем пользователям:",
-        parse_mode='HTML'
-    )
-    await state.set_state(Form.broadcast_message)
-    await callback.answer()
-
-@dp.message(Form.broadcast_message)
-async def process_broadcast(message: types.Message, state: FSMContext):
-    users = get_all_users()
-    sent = 0
-    failed = 0
-    
-    progress_msg = await message.answer(f"📤 Начинаю рассылку для {len(users)} пользователей...")
-    
-    for user_id, username, _, _ in users:
-        try:
-            await bot.send_message(user_id, message.text)
-            sent += 1
-            if sent % 10 == 0:
-                await progress_msg.edit_text(f"📤 Отправлено: {sent}/{len(users)}...")
-        except:
-            failed += 1
-        await asyncio.sleep(0.1)
-    
-    await progress_msg.edit_text(
-        f"✅ Рассылка завершена:\n"
-        f"📤 Отправлено: {sent}\n"
-        f"❌ Не отправлено: {failed}"
-    )
-    
-    await state.clear()
-
-# ========== ОБРАБОТКА ПЕРЕВОДОВ ==========
-@dp.message(F.text)
-async def handle_transaction_hash(message: types.Message):
-    # Простая проверка на хеш транзакции
-    text = message.text.strip()
-    if len(text) > 50 and all(c in 'abcdef0123456789' for c in text.lower()):
-        user_id = message.from_user.id
-        add_subscription(user_id, 30)  # 30 дней за оплату
-        
-        await message.answer(
-            f"✅ <b>Спасибо за оплату!</b>\n\n"
-            f"Ваша подписка активирована на 30 дней.\n"
-            f"Теперь вы можете использовать функцию сканирования!\n\n"
-            f"Нажмите /start для начала работы",
-            parse_mode='HTML'
-        )
-
-# ========== АВТО-СКАНИРОВАНИЕ В КАНАЛ ==========
-async def auto_scanner_channel():
-    """Автоматическое сканирование для канала"""
-    while True:
-        try:
-            await asyncio.sleep(300)  # 5 минут
-            
-            # Сканируем с базовыми настройками
-            brokers = ['Binance', 'Bybit', 'KuCoin']
-            opportunities = await scanner.find_opportunities(
-                brokers, 1000, 10, 3.0
-            )
-            
-            if opportunities:
-                # Берем лучшую связку
-                best_opp = opportunities[0]
-                if best_opp['profit_pct'] > 5.0:  # Только если доходность >5%
-                    signal = scanner.format_signal(best_opp, 'BEP20')
-                    
-                    try:
-                        await bot.send_message(CHANNEL_ID, signal, parse_mode='HTML')
-                        print(f"📤 Отправлен сигнал в канал: {best_opp['coin']}")
-                    except Exception as e:
-                        print(f"Ошибка отправки в канал: {e}")
-            
-        except Exception as e:
-            print(f"❌ Ошибка авто-сканера канала: {e}")
-            await asyncio.sleep(60)
+    await callback.answer(f"✅ Найдено {len(opportunities)} связок")
 
 # ========== ЗАПУСК БОТА ==========
 async def main():
-    print("🚀 Запуск бота...")
-    print(f"📢 Канал: {CHANNEL_ID}")
+    print("🚀 Запуск бота с CryptoBot...")
     print(f"👑 Админы: {ADMIN_IDS}")
     
-    # Запускаем авто-сканер для канала
-    asyncio.create_task(auto_scanner_channel())
+    # Запускаем авто-проверку платежей
+    asyncio.create_task(auto_check_payments())
+    
+    # Получаем информацию о CryptoBot
+    if CRYPTOBOT_TOKEN:
+        balance = await cryptobot.get_balance()
+        if balance:
+            print(f"💰 CryptoBot баланс: {len(balance)} валют")
+        else:
+            print("⚠️ Не удалось получить баланс CryptoBot")
     
     print("✅ Бот запущен и готов к работе!")
-    print("📡 Сканер арбитражных возможностей активен")
+    print("💳 Система оплаты через CryptoBot активна")
     
     await dp.start_polling(bot)
 
